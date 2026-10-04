@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 /**
  * Local dense retrieval for the vault: section embeddings (bge-small, int8) stored next to the FTS
  * tables, plus a cross-encoder reranker (bge-reranker-base, int8). Both models run on CPU through
- * onnxruntime and are fetched once into `<dataDir>/models`; nothing leaves the machine.
+ * onnxruntime and are fetched once into `data/models`; nothing leaves the machine.
  *
  * Vectors are keyed by a hash of the embedded text, so a restart or an unchanged note never
  * re-embeds. Embedding runs in the background after every reindex or upsert; until vectors exist
@@ -104,10 +104,10 @@ export class DenseIndex {
 
   constructor(
     readonly db: Database.Database,
-    dataDir: string,
+    modelsDir: string,
     readonly cfg: DenseConfig,
   ) {
-    this.modelsDir = path.join(dataDir, "models");
+    this.modelsDir = modelsDir;
     db.exec(SCHEMA);
   }
 

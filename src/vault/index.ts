@@ -213,7 +213,7 @@ export class VaultIndex {
     this.db = new Database(path.join(cfg.dataDir, "index.db"));
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
-    this.dense = cfg.retrieval.hybrid ? new DenseIndex(this.db, cfg.dataDir, cfg.retrieval) : null;
+    this.dense = cfg.retrieval.hybrid ? new DenseIndex(this.db, cfg.modelsDir, cfg.retrieval) : null;
   }
 
   onChange(fn: (event: "upsert" | "remove", id: string) => void): () => void {

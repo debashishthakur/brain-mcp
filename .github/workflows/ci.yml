@@ -34,6 +34,11 @@ jobs:
           ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       - run: npm run build
       - run: npm run typecheck
+      - name: Setup command (in a temp folder)
+        run: node scripts/verify-setup.mjs
+      # From here on a personal config exists, so every check below also proves it stays on the example vault.
+      - name: Personal setup
+        run: npm run setup -- --yes --name "CI Runner"
       - name: Smoke test (every tool over stdio)
         run: node scripts/smoke.mjs
       - name: Redaction, watcher, HTTP auth, audit

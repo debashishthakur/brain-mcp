@@ -37,11 +37,12 @@ node scripts/verify-memory.mjs   # brain_remember dedupe, topic identity, brain_
 node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search checks
+node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/eval-retrieval.mjs  # retrieval quality, keyword vs hybrid
 node scripts/eval-hybrid.mjs     # the harder question set
 ```
 
-All of these run against the bundled `example-vault/`. The scripts that write to the vault put it back exactly as they found it, so `git status` should be clean afterwards. If it is not, that is a bug worth reporting.
+All of these run against the bundled `example-vault/`, even if you have run `npm run setup` to point the server at your own notes. The scripts that write to the vault put it back exactly as they found it, so `git status` should be clean afterwards. If it is not, that is a bug worth reporting.
 
 `npm install` may ask you to approve install scripts. Only `better-sqlite3` and `esbuild` need them, and both are already listed under `allowScripts` in `package.json`.
 
@@ -54,7 +55,7 @@ node scripts/eval-retrieval.mjs   # 12 everyday questions
 node scripts/eval-hybrid.mjs      # 15 harder ones, including off-topic questions that should be refused
 ```
 
-To see why a query ranks the way it does, trace it with `node scripts/debug-rank.mjs "your question"`.
+To see why a query ranks the way it does, trace it with `node scripts/debug-rank.mjs "your question"`. It uses the same config as the server, so after `npm run setup` it traces your own notes; prefix it with `BRAIN_MCP_CONFIG=brain.config.json` to trace the example vault.
 
 Put the before and after output in the pull request. "Beat" means no metric goes down and at least one goes up.
 

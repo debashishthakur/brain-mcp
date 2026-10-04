@@ -2,6 +2,7 @@
 // against the bundled example vault: off-topic refusal, concept lookup, spelling correction,
 // identifiers, a paraphrased context question.
 // Run after `npm run build`:  node scripts/verify-hybrid.mjs
+import "./use-example-vault.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { loadConfig } from "../dist/config.js";

@@ -1,4 +1,5 @@
 // Smoke test: drive the server over stdio like a real MCP client would. Restores the vault afterwards.
+import "./use-example-vault.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ const cfg = loadConfig();
 const memPath = path.join(cfg.vaultDir, cfg.memoryFile);
 const memBefore = fs.existsSync(memPath) ? fs.readFileSync(memPath, "utf8") : null;
 const capturesBefore = new Set(fs.existsSync(path.join(cfg.vaultDir, cfg.captureDir)) ? fs.readdirSync(path.join(cfg.vaultDir, cfg.captureDir)) : []);
-const transport = new StdioClientTransport({ command: "node", args: [path.join(ROOT, "dist", "index.js"), "--stdio"], stderr: "pipe" });
+const transport = new StdioClientTransport({ command: "node", args: [path.join(ROOT, "dist", "index.js"), "--stdio"], stderr: "pipe", env: { ...process.env } });
 transport.stderr?.on("data", (d) => process.stderr.write("[server] " + d));
 const client = new Client({ name: "smoke", version: "0.0.1" });
 await client.connect(transport);

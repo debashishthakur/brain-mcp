@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";
 import { VaultIndex } from "./vault/index.js";
@@ -31,6 +32,8 @@ async function main(): Promise<void> {
   const policy = new Policy(cfg);
   const audit = new Audit(cfg.logDir);
 
+  const shown = path.relative(cfg.rootDir, cfg.configPath);
+  console.error(`[config] ${shown.startsWith("..") ? cfg.configPath : shown}, owner ${cfg.owner}`);
   const stats = index.fullReindex();
   console.error(`[index] ${stats.indexed} notes indexed, ${stats.removed} removed, ${stats.ms} ms (${cfg.vaultDir})`);
   if (has("--reindex")) {

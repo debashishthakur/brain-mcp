@@ -1,4 +1,5 @@
 // Verifies brain_remember deduplication over stdio, then restores Captures/Memory.md byte-for-byte.
+import "./use-example-vault.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ const cfg = loadConfig();
 const memPath = path.join(cfg.vaultDir, cfg.memoryFile);
 const before = fs.existsSync(memPath) ? fs.readFileSync(memPath, "utf8") : null;
 
-const transport = new StdioClientTransport({ command: "node", args: [path.join(ROOT, "dist", "index.js"), "--stdio"], stderr: "pipe" });
+const transport = new StdioClientTransport({ command: "node", args: [path.join(ROOT, "dist", "index.js"), "--stdio"], stderr: "pipe", env: { ...process.env } });
 const client = new Client({ name: "verify-memory", version: "0.0.1" });
 await client.connect(transport);
 

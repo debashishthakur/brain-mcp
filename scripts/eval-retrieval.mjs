@@ -3,6 +3,7 @@
 // buildContextHybrid) side by side. Run after `npm run build`. The hybrid rows need the models in
 // data/models (downloaded on first use) and section vectors (embedded on first run, hash-keyed).
 // Add cases as the vault grows; keep phrasing natural, not keyword-copied.
+import "./use-example-vault.mjs";
 import { loadConfig } from "../dist/config.js";
 import { VaultIndex } from "../dist/vault/index.js";
 import { Policy, ALL_SCOPES } from "../dist/policy.js";

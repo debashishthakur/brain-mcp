@@ -6,6 +6,10 @@ dist/
 data/
 logs/
 
+# your own setup from `npm run setup`: config and starter vault
+brain.config.local.json
+my-vault/
+
 # secrets
 .env
 .env.*

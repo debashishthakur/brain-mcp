@@ -1,5 +1,6 @@
 // End-to-end OAuth 2.1 verification against a throwaway auth database.
 // Drives the exact flow a remote client (claude.ai, Claude Code --transport http) performs.
+import "./use-example-vault.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

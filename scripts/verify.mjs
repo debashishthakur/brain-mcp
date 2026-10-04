@@ -1,4 +1,5 @@
 // Verifies: redaction patterns, the file watcher, and the HTTP transport with bearer auth.
+import "./use-example-vault.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";

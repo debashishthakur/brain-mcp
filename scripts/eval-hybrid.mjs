@@ -1,6 +1,7 @@
 // 35-query hard set (paraphrase, typo, identifier, date, multi-hop, alias, off-topic) with gold note
 // ids, scored on the keyword path and the hybrid path. Cases live in eval-hybrid-cases.json.
 // Run after `npm run build`:  node scripts/eval-hybrid.mjs
+import "./use-example-vault.mjs";
 import fs from "node:fs";
 import { loadConfig } from "../dist/config.js";
 import { VaultIndex } from "../dist/vault/index.js";

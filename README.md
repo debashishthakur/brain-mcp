@@ -145,6 +145,16 @@ The repository ships with `example-vault/`, a small fictional vault belonging to
 
 The first hybrid query downloads the two models (about 300 MB) from Hugging Face into `data/models`. After that, everything runs offline.
 
+### Make it yours
+
+```bash
+npm run setup
+```
+
+Setup asks for your name (it suggests the one from `git config`) and where your notes are. Point it at an existing Obsidian vault, or press Enter for a starter vault in `my-vault/` with a profile note to fill in. It writes `brain.config.local.json`, which git ignores and the server uses from then on, with its own index so your notes never mix with the example. It ends by printing the `claude mcp add` command for your machine: run it, then ask Claude "what do you know about me?"
+
+Delete `brain.config.local.json` to go back to the example vault. The checks and evals always run against the example vault, so they keep passing after setup.
+
 <details>
 <summary><b>All checks</b> (the same ones CI runs)</summary>
 
@@ -155,6 +165,7 @@ node scripts/verify-memory.mjs   # brain_remember dedupe, topic identity, brain_
 node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
+node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
 node scripts/eval-hybrid.mjs     # 15 harder questions: paraphrase, typo, identifier, date, multi-hop, alias, off-topic
 node scripts/debug-rank.mjs "your question"   # trace one query through every ranking step
@@ -186,11 +197,12 @@ Hybrid search puts the right note first far more often and refuses questions the
 
 ## Use your own vault
 
-Edit `brain.config.json`:
+`npm run setup` does this for you. To do it by hand, copy `brain.config.json` to `brain.config.local.json` and change what differs:
 
 ```json
 {
   "vaultPath": "../my-vault",
+  "dataDir": "./data/local",
   "owner": "Your Name",
   "privatePaths": ["Private/**", "Journal/**"],
   "identity": {
@@ -201,7 +213,7 @@ Edit `brain.config.json`:
 }
 ```
 
-`vaultPath` is resolved relative to the config file. Use `--config <path>` or `BRAIN_MCP_CONFIG` to keep your config outside the repository, then run `npm run reindex` to check the note count.
+`vaultPath` and `dataDir` are resolved relative to the config file. The server uses the first config it finds: `--config <path>`, then `BRAIN_MCP_CONFIG`, then `brain.config.local.json`, then `brain.config.json`. Run `npm run reindex` to check the note count; the first log line names the config in use.
 
 <details>
 <summary><b>What the server reads from a note</b></summary>
@@ -242,6 +254,7 @@ Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become 
 | Key | Meaning |
 | --- | --- |
 | `vaultPath` | Vault folder, relative to the config file. |
+| `dataDir` | Folder for the search index and the OAuth database, relative to the config file. Default: `data/`. Setup sets `./data/local`, so your index never mixes with the example vault's. The models stay in `data/models` either way. |
 | `owner` | Name used in the server instructions and the identity bundle. |
 | `captureDir` | The only folder the server writes to. |
 | `memoryFile` | File `brain_remember` appends to. Must be inside `captureDir`. |
@@ -427,10 +440,11 @@ brain-mcp/
 │   ├── vault/            parsing notes, the SQLite index, hybrid ranking
 │   │   └── dense.ts      local embeddings and the reranker
 │   └── auth/             OAuth 2.1 server, login page, TOTP, token store
-├── scripts/              smoke test, verification scripts, retrieval eval
+├── scripts/              setup, smoke test, verification scripts, retrieval eval
+├── templates/            the starter vault npm run setup creates
 ├── example-vault/        a fictional vault used by every script
 ├── deploy/               Linux and Windows setup, Cloudflare Tunnel template
-└── brain.config.json
+└── brain.config.json     the example vault's config; npm run setup writes yours beside it
 ```
 
 ## License
