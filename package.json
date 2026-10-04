@@ -1,0 +1,62 @@
+{
+  "name": "brain-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that turns an Obsidian vault into live, searchable context for Claude and other MCP clients",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "obsidian",
+    "second-brain",
+    "claude",
+    "sqlite",
+    "fts5"
+  ],
+  "author": "Debashish Thakur",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/debashishthakur/brain-mcp.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "brain-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts --stdio",
+    "start": "node dist/index.js --stdio",
+    "start:http": "node dist/index.js --http",
+    "reindex": "node dist/index.js --reindex",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "chokidar": "^5.0.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "gray-matter": "^4.0.3",
+    "minimatch": "^10.2.6",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.2",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "esbuild@0.28.2": true
+  }
+}

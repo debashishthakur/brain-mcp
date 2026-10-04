@@ -1,0 +1,13 @@
+# Copy to /etc/cloudflared/config.yml after `cloudflared tunnel create brain`.
+# Replace __TUNNEL_ID__ with the id that command prints, __HOME__ with the box user's home,
+# and brain.example.com with the hostname in auth.publicUrl. The setup scripts print a command that does all three.
+tunnel: __TUNNEL_ID__
+credentials-file: __HOME__/.cloudflared/__TUNNEL_ID__.json
+
+ingress:
+  - hostname: brain.example.com
+    service: http://127.0.0.1:3737
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 30s
+  - service: http_status:404

@@ -1,0 +1,25 @@
+# dependencies and build output
+node_modules/
+dist/
+
+# runtime state: the search index, the OAuth database, the audit log
+data/
+logs/
+
+# secrets
+.env
+.env.*
+
+# Obsidian workspace state, created when the example vault is opened in Obsidian
+example-vault/.obsidian/
+example-vault/.trash/
+
+# editors and OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.log
+npm-debug.log*

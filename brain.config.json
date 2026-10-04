@@ -1,0 +1,39 @@
+{
+  "vaultPath": "./example-vault",
+  "owner": "Ines Varga",
+  "captureDir": "Captures",
+  "memoryFile": "Captures/Memory.md",
+  "ignoreDirs": [".obsidian", "_build", "Templates", ".trash"],
+  "denyPaths": [],
+  "privateProjects": [],
+  "privatePaths": ["Private/**"],
+  "context": {
+    "budgetChars": 18000,
+    "maxSectionChars": 3500,
+    "maxSectionsPerNote": 3,
+    "candidateSections": 40,
+    "candidateNotes": 15
+  },
+  "identity": {
+    "profileNote": "About Ines",
+    "memoryProject": "Assistant Memory",
+    "skillsProject": "Assistant Skills",
+    "focusWindowDays": 14,
+    "maxCharsPerMemoryNote": 4000,
+    "maxTotalChars": 60000
+  },
+  "http": {
+    "host": "127.0.0.1",
+    "port": 3737,
+    "path": "/mcp"
+  },
+  "auth": {
+    "mode": "token",
+    "publicUrl": "https://brain.example.com",
+    "accessTokenTtlSec": 3600,
+    "refreshTokenTtlSec": 2592000,
+    "lockoutAfterFailures": 5,
+    "lockoutWindowSec": 900,
+    "defaultScopes": ["brain:read", "brain:write", "brain:private"]
+  }
+}

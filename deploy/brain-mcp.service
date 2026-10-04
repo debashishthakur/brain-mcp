@@ -1,0 +1,29 @@
+[Unit]
+Description=brain-mcp server (OAuth, behind Cloudflare Tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/env node dist/index.js --oauth
+Environment=NODE_ENV=production
+Environment=BRAIN_MCP_AUTH_MODE=oauth
+Restart=always
+RestartSec=3
+# The server only ever listens on loopback; cloudflared is the only thing that reaches it.
+# Hardening: read-only filesystem except the index, logs and the vault (writes land in Captures/).
+# deploy/setup-linux.sh fills in __USER__, __APP_DIR__ and __VAULT_DIR__ (from vaultPath in brain.config.json).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__APP_DIR__/data __APP_DIR__/logs __VAULT_DIR__
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
