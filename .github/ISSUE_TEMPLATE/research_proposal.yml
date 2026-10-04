@@ -1,0 +1,33 @@
+name: Research proposal
+description: An experiment that could make retrieval or memory better
+labels: ["research"]
+body:
+  - type: markdown
+    attributes:
+      value: "Research ideas are welcome before there is any code. The bundled eval (scripts/eval-retrieval.mjs) is how results are judged."
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question
+      description: What do you want to find out?
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Method
+      description: The approach, models or algorithms, and any papers it builds on.
+    validations:
+      required: true
+  - type: textarea
+    id: measure
+    attributes:
+      label: How it will be measured
+      description: Which eval metrics should move, and which new eval questions are needed.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints checked
+      description: Runs locally with no network calls on note content? Off by default behind a flag? Deterministic?

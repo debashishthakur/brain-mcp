@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Build and verify (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Smoke test (every tool over stdio)
+        run: node scripts/smoke.mjs
+      - name: Redaction, watcher, HTTP auth, audit
+        run: node scripts/verify.mjs
+      - name: Memory and identity
+        run: node scripts/verify-memory.mjs
+      - name: OAuth 2.1 flow
+        run: node scripts/verify-oauth.mjs
+      - name: Retrieval eval
+        run: node scripts/eval-retrieval.mjs
+      - name: Vault is restored
+        run: git diff --exit-code -- example-vault
