@@ -47,11 +47,25 @@ brain-mcp keeps that context in the Markdown notes you already own. Connect any 
 
 ```mermaid
 flowchart LR
-    V["Obsidian vault<br/>plain Markdown"] -->|file watcher| B["brain-mcp<br/>SQLite: word index,<br/>embeddings, link graph"]
-    B -->|MCP over stdio| L["Claude Code<br/>Claude Desktop"]
-    B -->|MCP over HTTPS<br/>OAuth 2.1| R["claude.ai, phone,<br/>any MCP client"]
-    L -. brain_remember .-> V
-    R -. brain_capture .-> V
+    V["Obsidian vault<br/>plain Markdown"]
+
+    subgraph S["brain-mcp: one Node process, one SQLite file"]
+        I["Indexer<br/>sections, links,<br/>topics, projects"]
+        DB[("SQLite<br/>FTS5 word index<br/>section embeddings<br/>link graph")]
+        M["Local models on CPU<br/>bge-small embedder<br/>bge-reranker"]
+        R["Hybrid retrieval"]
+        T["13 MCP tools"]
+        G["Scopes, redaction,<br/>audit log"]
+        I --> DB --> R --> T --> G
+        M -.-> DB
+        M -.-> R
+    end
+
+    V -->|file watcher| I
+    G -->|stdio| C1["Claude Code,<br/>Claude Desktop"]
+    G -->|HTTP + bearer token| C2["Clients on<br/>your network"]
+    G -->|OAuth 2.1 through<br/>Cloudflare Tunnel| C3["claude.ai, phone,<br/>any MCP client"]
+    T -. "remember, capture, write,<br/>edit, move, delete<br/>(allowed folders only)" .-> V
 ```
 
 1. **Index.** Every note is split into sections and indexed with its links, topics and project. Each section also gets an embedding (`bge-small-en-v1.5`) in the background. A file watcher keeps both current within a second of a save.
@@ -63,6 +77,22 @@ flowchart LR
    - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
 4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
+
+The retrieval step from question to answer:
+
+```mermaid
+flowchart LR
+    Q["Question"] --> U["Understand<br/>shorthands,<br/>typo fixes"]
+    U --> K["Keywords<br/>per section, BM25"]
+    U --> D["Meaning<br/>embeddings"]
+    U --> DT["Exact dates"]
+    U --> NT["Note titles<br/>BM25"]
+    K & D & DT & NT --> F["Fuse<br/>reciprocal rank fusion"]
+    F --> RR["Rerank top 16<br/>cross-encoder<br/>(top 3 when keywords<br/>and meaning agree)"]
+    RR --> GT{"Best score<br/>above the floor?"}
+    GT -->|no| X["Nothing relevant"]
+    GT -->|yes| A["Cited passages<br/>coverage: good or thin"]
+```
 
 Everything runs on your machine: the models are downloaded once into `data/models`, and no note leaves the server. If the models are not ready yet, retrieval falls back to keywords, so the server never blocks. Set `BRAIN_MCP_HYBRID=0` to stay keyword-only.
 
