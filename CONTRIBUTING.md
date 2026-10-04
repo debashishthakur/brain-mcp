@@ -10,6 +10,10 @@ Thank you for helping. brain-mcp is meant to be learned from and experimented on
 | A weekend | A Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5)), an importer ([#6](https://github.com/debashishthakur/brain-mcp/issues/6)), passkey sign-in ([#7](https://github.com/debashishthakur/brain-mcp/issues/7)) |
 | A research question | Embeddings ([#1](https://github.com/debashishthakur/brain-mcp/issues/1)), graph expansion ([#2](https://github.com/debashishthakur/brain-mcp/issues/2)), abstention ([#3](https://github.com/debashishthakur/brain-mcp/issues/3)), temporal memory ([#8](https://github.com/debashishthakur/brain-mcp/issues/8)) |
 
+### Architecture ideas welcome
+
+The current design is the most basic version that works: one process, one SQLite file, keyword search with reciprocal rank fusion, and a context pack built by fixed rules. A few knobs exist today (`context.*` in `brain.config.json`, and constants such as `RRF_K` and `TITLE_BONUS` in `src/vault/index.ts`). Making more of it configurable or swappable, such as retrievers, embedding backends, rerankers, storage and graph strategies, is a direction we would like help with. Ideas are welcome as issues, with or without code.
+
 Open an issue before starting anything larger than a bug fix, so we can agree on the shape first. Research ideas are welcome as issues even before you have code: use the **Research proposal** template.
 
 ## Setup

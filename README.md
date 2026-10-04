@@ -57,6 +57,9 @@ flowchart LR
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
 4. **Remember.** `brain_remember` appends durable facts and refuses near duplicates, so memory stays clean.
 
+> [!NOTE]
+> **The architecture is intentionally basic right now, and ideas are welcome.** It is one process, one SQLite file, keyword search with reciprocal rank fusion, and a context pack built by fixed rules. Some of it is already tweakable: context budgets and candidate pool sizes in `brain.config.json`, and fusion constants such as `RRF_K` and `TITLE_BONUS` in `src/vault/index.ts`. Much more could become configurable, such as pluggable retrievers, embedding backends, rerankers, storage and graph strategies. If you have an idea, [open an issue](https://github.com/debashishthakur/brain-mcp/issues/new/choose) or a research proposal, even before there is code.
+
 <p align="center">
   <img src="docs/images/graph-tour.jpg" alt="The project site: the example vault as a rotating brain, with one note lit and its wikilinks drawn in orange" width="92%" />
   <br />
@@ -309,6 +312,8 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 
 > [!IMPORTANT]
 > **brain-mcp is built to be learned from and experimented on, and it needs contributors to succeed.** It is a small, readable codebase with a real, measurable problem at its centre: helping an AI find the right note in someone's personal knowledge. If you are learning how MCP servers work, studying retrieval, or researching memory for AI systems, this is a good place to do it, and every improvement you make is measured by the bundled eval.
+>
+> The architecture is deliberately simple today, so there is plenty of room to reshape it. Proposals to make parts of it configurable or swappable are as welcome as code.
 
 ### Good for learning
 
