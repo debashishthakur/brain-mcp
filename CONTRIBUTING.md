@@ -8,11 +8,11 @@ Thank you for helping. brain-mcp is meant to be learned from and experimented on
 | --- | --- |
 | An hour | Add eval questions ([#4](https://github.com/debashishthakur/brain-mcp/issues/4)), fix a doc, report a confusing setup step |
 | A weekend | A Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5)), an importer ([#6](https://github.com/debashishthakur/brain-mcp/issues/6)), passkey sign-in ([#7](https://github.com/debashishthakur/brain-mcp/issues/7)) |
-| A research question | Embeddings ([#1](https://github.com/debashishthakur/brain-mcp/issues/1)), graph expansion ([#2](https://github.com/debashishthakur/brain-mcp/issues/2)), abstention ([#3](https://github.com/debashishthakur/brain-mcp/issues/3)), temporal memory ([#8](https://github.com/debashishthakur/brain-mcp/issues/8)) |
+| A research question | Abstention calibration ([#3](https://github.com/debashishthakur/brain-mcp/issues/3)), a faster reranker ([#10](https://github.com/debashishthakur/brain-mcp/issues/10)), graph expansion ([#2](https://github.com/debashishthakur/brain-mcp/issues/2)), temporal memory ([#8](https://github.com/debashishthakur/brain-mcp/issues/8)) |
 
 ### Architecture ideas welcome
 
-The current design is the most basic version that works: one process, one SQLite file, keyword search with reciprocal rank fusion, and a context pack built by fixed rules. A few knobs exist today (`context.*` in `brain.config.json`, and constants such as `RRF_K` and `TITLE_BONUS` in `src/vault/index.ts`). Making more of it configurable or swappable, such as retrievers, embedding backends, rerankers, storage and graph strategies, is a direction we would like help with. Ideas are welcome as issues, with or without code.
+The current design is deliberately simple: one process, one SQLite file, and a hybrid ranker (keywords, local embeddings, a reranker) built from fixed rules. Knobs exist today in the `retrieval` and `context` blocks of `brain.config.json`, and in constants such as `RRF_K` and `TITLE_BONUS` in `src/vault/index.ts`. Making more of it configurable or swappable, such as retrievers, storage, graph strategies and query rewriting, is a direction we would like help with. Ideas are welcome as issues, with or without code.
 
 Open an issue before starting anything larger than a bug fix, so we can agree on the shape first. Research ideas are welcome as issues even before you have code: use the **Research proposal** template.
 
@@ -34,8 +34,11 @@ npm run typecheck
 node scripts/smoke.mjs           # every tool over stdio against example-vault/
 node scripts/verify.mjs          # redaction, watcher, HTTP auth, audit log
 node scripts/verify-memory.mjs   # brain_remember dedupe, topic identity, brain_context
+node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
-node scripts/eval-retrieval.mjs  # retrieval quality
+node scripts/verify-hybrid.mjs   # hybrid search checks
+node scripts/eval-retrieval.mjs  # retrieval quality, keyword vs hybrid
+node scripts/eval-hybrid.mjs     # the harder question set
 ```
 
 All of these run against the bundled `example-vault/`. The scripts that write to the vault put it back exactly as they found it, so `git status` should be clean afterwards. If it is not, that is a bug worth reporting.
@@ -44,11 +47,14 @@ All of these run against the bundled `example-vault/`. The scripts that write to
 
 ## The ranking rule
 
-Any change that affects ranking (search, `brain_context` packing, fusion weights, stemming, stopwords, rerankers, embeddings) must beat the current numbers from:
+Any change that affects ranking (search, `brain_context` packing, fusion weights, stemming, stopwords, rerankers, embeddings, the relevance floor) must beat the current numbers from both evals:
 
 ```bash
-node scripts/eval-retrieval.mjs
+node scripts/eval-retrieval.mjs   # 12 everyday questions
+node scripts/eval-hybrid.mjs      # 15 harder ones, including off-topic questions that should be refused
 ```
+
+To see why a query ranks the way it does, trace it with `node scripts/debug-rank.mjs "your question"`.
 
 Put the before and after output in the pull request. "Beat" means no metric goes down and at least one goes up.
 

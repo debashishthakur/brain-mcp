@@ -103,7 +103,7 @@ try {
   };
   const client = await connect(tok.access_token);
   const tools = await client.listTools();
-  check("MCP session over OAuth token lists tools", tools.tools.length === 9, tools.tools.map((t) => t.name).join(","));
+  check("MCP session over OAuth token lists tools", tools.tools.length === 13, tools.tools.map((t) => t.name).join(","));
   const priv = await client.callTool({ name: "brain_read", arguments: { note: "Offer negotiation notes" } });
   check("private note hidden without brain:private scope", priv.isError === true, priv.content[0].text.slice(0, 60));
   const pub = await client.callTool({ name: "brain_read", arguments: { note: "About Ines" } });

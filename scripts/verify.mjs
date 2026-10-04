@@ -63,7 +63,7 @@ const transport = new StreamableHTTPClientTransport(new URL(base), { requestInit
 const client = new Client({ name: "verify", version: "0.0.1" });
 await client.connect(transport);
 const tools = await client.listTools();
-check("http session lists tools", tools.tools.length === 9, tools.tools.map((t) => t.name).join(","));
+check("http session lists tools", tools.tools.length === 13, tools.tools.map((t) => t.name).join(","));
 
 const probe = "watcher-probe-" + Date.now();
 const before = await client.callTool({ name: "brain_search", arguments: { query: probe } });

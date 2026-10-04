@@ -1,12 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DENSE_DEFAULTS, type DenseConfig } from "./vault/dense.js";
 
 export interface BrainConfig {
+  /** Hybrid retrieval (BM25 + local embeddings + reranker). Every field is optional; see DENSE_DEFAULTS. */
+  retrieval?: Partial<DenseConfig>;
   vaultPath: string;
   owner: string;
   captureDir: string;
   memoryFile: string;
+  /** Folders whose notes brain_write/edit/move/delete may change. Default: captureDir + "Notes". */
+  writableDirs?: string[];
   ignoreDirs: string[];
   denyPaths: string[];
   privateProjects: string[];
@@ -50,11 +55,12 @@ const AUTH_DEFAULTS: BrainConfig["auth"] = {
   defaultScopes: ["brain:read", "brain:write", "brain:private"],
 };
 
-export interface ResolvedConfig extends BrainConfig {
+export interface ResolvedConfig extends Omit<BrainConfig, "retrieval"> {
   rootDir: string; // brain-mcp package root
   vaultDir: string; // absolute vault path
   dataDir: string;
   logDir: string;
+  retrieval: DenseConfig;
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -75,5 +81,7 @@ export function loadConfig(overridePath?: string): ResolvedConfig {
   if (process.env.BRAIN_MCP_PUBLIC_URL) auth.publicUrl = process.env.BRAIN_MCP_PUBLIC_URL;
   if (process.env.BRAIN_MCP_HOST) raw.http.host = process.env.BRAIN_MCP_HOST;
   if (process.env.BRAIN_MCP_PORT) raw.http.port = Number(process.env.BRAIN_MCP_PORT);
-  return { ...raw, auth, rootDir: ROOT_DIR, vaultDir, dataDir, logDir };
+  const retrieval: DenseConfig = { ...DENSE_DEFAULTS, ...(raw.retrieval ?? {}), aliases: { ...DENSE_DEFAULTS.aliases, ...(raw.retrieval?.aliases ?? {}) } };
+  if (process.env.BRAIN_MCP_HYBRID === "0") retrieval.hybrid = false; // emergency switch back to keyword-only ranking
+  return { ...raw, auth, retrieval, rootDir: ROOT_DIR, vaultDir, dataDir, logDir };
 }

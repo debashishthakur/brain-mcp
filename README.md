@@ -19,6 +19,7 @@ An open-source [Model Context Protocol](https://modelcontextprotocol.io) server 
 ![MCP](https://img.shields.io/badge/MCP-server-000000?logo=modelcontextprotocol&logoColor=white)
 ![SQLite FTS5](https://img.shields.io/badge/SQLite-FTS5-003B57?logo=sqlite&logoColor=white)
 ![Obsidian](https://img.shields.io/badge/Obsidian-vault-7C3AED?logo=obsidian&logoColor=white)
+![Local models](https://img.shields.io/badge/models-local%20ONNX-FFD21E?logo=huggingface&logoColor=black)
 ![OAuth 2.1](https://img.shields.io/badge/OAuth-2.1%20%2B%20PKCE-EB5424)
 ![Cloudflare Tunnel](https://img.shields.io/badge/Cloudflare-Tunnel-F38020?logo=cloudflare&logoColor=white)
 
@@ -36,29 +37,37 @@ brain-mcp keeps that context in the Markdown notes you already own. Connect any 
 
 - **Your files, your machine.** Notes stay plain Markdown in a folder you control. Nothing is uploaded to a third party.
 - **One memory, every client.** Claude Code, Claude Desktop, claude.ai, your phone and anything else that speaks MCP read the same vault.
-- **Deterministic and measured.** No model inside the server. Ranking is SQLite FTS5 plus fixed fusion rules, scored by a bundled retrieval eval.
+- **Hybrid retrieval, fully local.** Keyword search plus meaning search with a small embedding model, then a reranker, all on your CPU. It can also answer "the vault does not record this" instead of guessing.
+- **Measured.** Every ranking change is scored by two bundled evals, keyword and hybrid side by side.
 - **Private by default.** OAuth 2.1 with PKCE for remote access, read, write and private scopes, secret redaction and an audit log of every call.
 - **Writes back.** `brain_remember` and `brain_capture` turn what a model learns into notes you can read and edit.
-- **Small and readable.** About 2,900 lines of strict TypeScript. Easy to study, easy to extend.
+- **Small and readable.** About 3,800 lines of strict TypeScript. Easy to study, easy to extend.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    V["Obsidian vault<br/>plain Markdown"] -->|file watcher| B["brain-mcp<br/>SQLite FTS5 index<br/>+ wikilink graph"]
+    V["Obsidian vault<br/>plain Markdown"] -->|file watcher| B["brain-mcp<br/>SQLite: word index,<br/>embeddings, link graph"]
     B -->|MCP over stdio| L["Claude Code<br/>Claude Desktop"]
     B -->|MCP over HTTPS<br/>OAuth 2.1| R["claude.ai, phone,<br/>any MCP client"]
     L -. brain_remember .-> V
     R -. brain_capture .-> V
 ```
 
-1. **Index.** Every note is split into sections and indexed with its links, topics and project. A file watcher keeps the index current within a second of a save.
-2. **Retrieve.** `brain_context` returns the few sections that answer a question, ranked and cited by note, packed under a size budget.
+1. **Index.** Every note is split into sections and indexed with its links, topics and project. Each section also gets an embedding (`bge-small-en-v1.5`) in the background. A file watcher keeps both current within a second of a save.
+2. **Retrieve.** A question goes through five steps:
+   - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
+   - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
+   - **Fuse** the four lists with reciprocal rank fusion.
+   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`). When keyword and meaning search agree on the top hit, only the top 3 are reranked.
+   - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
-4. **Remember.** `brain_remember` appends durable facts and refuses near duplicates, so memory stays clean.
+4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
+
+Everything runs on your machine: the models are downloaded once into `data/models`, and no note leaves the server. If the models are not ready yet, retrieval falls back to keywords, so the server never blocks. Set `BRAIN_MCP_HYBRID=0` to stay keyword-only.
 
 > [!NOTE]
-> **The architecture is intentionally basic right now, and ideas are welcome.** It is one process, one SQLite file, keyword search with reciprocal rank fusion, and a context pack built by fixed rules. Some of it is already tweakable: context budgets and candidate pool sizes in `brain.config.json`, and fusion constants such as `RRF_K` and `TITLE_BONUS` in `src/vault/index.ts`. Much more could become configurable, such as pluggable retrievers, embedding backends, rerankers, storage and graph strategies. If you have an idea, [open an issue](https://github.com/debashishthakur/brain-mcp/issues/new/choose) or a research proposal, even before there is code.
+> **The architecture is intentionally simple right now, and ideas are welcome.** It is one process and one SQLite file, with a hybrid ranker built from fixed rules. Some of it is already tweakable: the `retrieval` block in `brain.config.json` (embedding and reranker models, how many candidates to rerank, the score blend, the "nothing relevant" floor, your own shorthands), context budgets under `context`, and fusion constants such as `RRF_K` and `TITLE_BONUS` in `src/vault/index.ts`. Much more could become configurable, such as pluggable retrievers and storage, graph strategies, and query rewriting. If you have an idea, [open an issue](https://github.com/debashishthakur/brain-mcp/issues/new/choose) or a research proposal, even before there is code.
 
 <p align="center">
   <img src="docs/images/graph-tour.jpg" alt="The project site: the example vault as a rotating brain, with one note lit and its wikilinks drawn in orange" width="92%" />
@@ -71,18 +80,24 @@ flowchart LR
 | Tool | What it returns |
 | --- | --- |
 | `brain_identity` | Persona bundle: profile note, memory notes, facts captured with `brain_remember`, skills, project list and recent focus. The server instructions ask clients to call this first. Pass `topic` for a smaller bundle. |
-| `brain_context` | The sections most relevant to a question, with source note ids. Section-level FTS fused with note-level FTS, a graph-neighbour bonus and a title-match bonus, packed under a size budget. |
-| `brain_search` | Full-text search with project, type, topic and since-date filters. BM25 rank fused with title overlap. |
+| `brain_context` | The sections most relevant to a question, with source note ids and a coverage label, from the hybrid ranker, packed under a size budget. Says so explicitly when the vault does not record the answer. |
+| `brain_search` | Hybrid search (keywords, meaning, reranker, spelling correction) with project, type, topic and date filters. Returns ranked notes with snippets. |
 | `brain_read` | One note, or one section of it, with metadata, topics and resolved links. |
 | `brain_project` | Briefing on a project: description, latest progress, decisions, recent changes and notes grouped by type. With no argument it lists projects. |
 | `brain_graph` | Links out, backlinks grouped by project, and notes that share topics. |
 | `brain_recent` | Notes modified in the last N days, newest first. |
 | `brain_capture` | Writes a new note with graph-ready frontmatter into the capture folder. |
 | `brain_remember` | Appends a fact to the memory file; it joins `brain_identity` straight away. Near duplicates are refused (token Jaccard ≥ 0.6 or containment ≥ 0.85), partial overlaps get a `Supersedes` line, and `force=true` overrides. |
+| `brain_write` | Creates a note at a chosen path in a writable folder (`Notes/` and the capture folder by default), or replaces one with `overwrite=true`. A `hub` note groups every note whose `project` matches its title. |
+| `brain_edit` | Changes part of a note in one of three ways: replace text that matches once, replace a section under a heading, or append. Keeps the file's line endings and bumps `modified`. |
+| `brain_move` | Moves or renames a note within the writable folders. Never overwrites, and names any notes whose links stop resolving. |
+| `brain_delete` | Moves a note into `.trash/`, which is never indexed. Nothing is erased. |
+
+The four write tools need the `brain:write` scope. They refuse notes a pipeline generates, hidden folders, paths outside the vault, and the memory file, which stays append-only through `brain_remember`.
 
 Also exposed: the resources `brain://identity` and `brain://note/{path}`, and the prompts `assume_persona` and `project_briefing`.
 
-The index lives in `data/index.db`. It is rebuilt on every start (about 10 ms for the 15-note example vault) and kept current by the watcher. Every tool call is appended to `logs/audit.jsonl`.
+The index lives in `data/index.db`, embeddings included. It is rebuilt on every start (about 10 ms for the 15-note example vault) and kept current by the watcher; embeddings are keyed by a hash of the text, so unchanged sections are never embedded twice. Every tool call is appended to `logs/audit.jsonl`.
 
 ## Quick start
 
@@ -98,6 +113,8 @@ node scripts/smoke.mjs
 
 The repository ships with `example-vault/`, a small fictional vault belonging to Ines Varga, a backend engineer with two side projects. `brain.config.json` points at it, so the smoke test drives every tool, resource and prompt over stdio against real notes, then restores the vault.
 
+The first hybrid query downloads the two models (about 300 MB) from Hugging Face into `data/models`. After that, everything runs offline.
+
 <details>
 <summary><b>All checks</b> (the same ones CI runs)</summary>
 
@@ -105,26 +122,37 @@ The repository ships with `example-vault/`, a small fictional vault belonging to
 npm run typecheck
 node scripts/verify.mjs          # redaction, file watcher, HTTP bearer auth, audit log
 node scripts/verify-memory.mjs   # brain_remember dedupe, topic identity, brain_context
+node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
-node scripts/eval-retrieval.mjs  # natural-language questions with expected notes
+node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
+node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
+node scripts/eval-hybrid.mjs     # 15 harder questions: paraphrase, typo, identifier, date, multi-hop, alias, off-topic
+node scripts/debug-rank.mjs "your question"   # trace one query through every ranking step
 ```
 
-If `npm install` reports held-back install scripts, the two packages that need them (`better-sqlite3` and `esbuild`) are already listed under `allowScripts` in `package.json`. Run `npm install-scripts approve better-sqlite3 esbuild` if your npm still asks.
+If `npm install` reports held-back install scripts, the two packages that need them (`better-sqlite3` and `esbuild`) are already listed under `allowScripts` in `package.json`. Run `npm install-scripts approve better-sqlite3 esbuild` if your npm still asks. The scripts of `onnxruntime-node` and `protobufjs` are not needed for CPU use.
 
 </details>
 
 ## Retrieval eval
 
-`scripts/eval-retrieval.mjs` asks natural-language questions about the example vault and checks whether the expected note comes back. Current numbers, deterministic ranking only:
+Two scripts score retrieval on the example vault, keyword and hybrid side by side. Results are deterministic and reproducible from a fresh clone.
 
-| Metric | Result |
-| --- | --- |
-| `brain_search` top-1 | 42% |
-| `brain_search` top-5 | 100% |
-| `brain_context` first source correct | 58% |
-| `brain_context` expected note in pack | 100% |
+**`eval-retrieval.mjs`**, 12 everyday questions:
 
-The last row is the one a client model experiences, since it reads the whole pack. Most misses are paraphrases such as "who am I and where do I work", which share no keywords with the profile note. Closing that gap is [issue #1](https://github.com/debashishthakur/brain-mcp/issues/1).
+| Ranker | Right note first | Right note in top 5 | Expected note in the context pack | Time per question (laptop CPU) |
+| --- | --- | --- | --- | --- |
+| Keyword only | 42% | 100% | 100% | 2 ms |
+| Hybrid (default) | **67%** | 75% | 75% | about 0.6 s |
+
+**`eval-hybrid.mjs`**, 15 harder questions:
+
+| Ranker | Right note first | Right note in top 5 | Off-topic questions refused |
+| --- | --- | --- | --- |
+| Keyword only | 67% | 100% | 2 of 3 |
+| Hybrid (default) | 67% | 75% | **3 of 3** |
+
+Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is the "nothing relevant" floor: on these short example notes it also refuses some real questions, such as "the raspberry pi overheating in the sun". Calibrating that floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
 
 ## Use your own vault
 
@@ -192,10 +220,12 @@ Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become 
 | `privateProjects`, `privatePaths` | Project names and globs that need the `brain:private` scope. |
 | `context.*` | `brain_context` budget, per-section cap, sections per note and candidate pool sizes. |
 | `identity.*` | Profile note, memory and skills projects, focus window and size caps. |
+| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"), `keepRatio`, `earlyExit`, and `aliases` for your own shorthands. Every field is optional. |
+| `writableDirs` | Folders the write, edit, move and delete tools may change. Default: the capture folder and `Notes`. |
 | `http.*` | Host, port and path for HTTP modes. The shipped config uses `127.0.0.1:3737/mcp`. |
 | `auth.*` | Mode, public URL, token lifetimes, lockout policy and default scopes for OAuth. |
 
-Environment overrides: `BRAIN_MCP_CONFIG`, `BRAIN_MCP_DATA_DIR`, `BRAIN_MCP_LOG_DIR`, `BRAIN_MCP_HOST`, `BRAIN_MCP_PORT`, `BRAIN_MCP_AUTH_MODE` (`token` or `oauth`) and `BRAIN_MCP_PUBLIC_URL`.
+Environment overrides: `BRAIN_MCP_CONFIG`, `BRAIN_MCP_DATA_DIR`, `BRAIN_MCP_LOG_DIR`, `BRAIN_MCP_HOST`, `BRAIN_MCP_PORT`, `BRAIN_MCP_AUTH_MODE` (`token` or `oauth`), `BRAIN_MCP_PUBLIC_URL`, and `BRAIN_MCP_HYBRID=0` to switch back to keyword-only ranking.
 
 </details>
 
@@ -288,7 +318,8 @@ Keep the vault fresh on the box with Syncthing, or a git push and a pull on a ti
 - **Transport.** stdio inherits the OS user. HTTP needs a bearer token compared in constant time, and each session is bound to the client id that opened it.
 - **Scopes.** `brain:read`, `brain:write`, `brain:private`. Notes marked `visibility: private`, or matched by `privateProjects` or `privatePaths`, need the private scope. `denyPaths` are never served. The example vault keeps one note under `Private/` so you can watch this work.
 - **Redaction.** Credential-shaped strings (Anthropic, OpenAI, GitHub, AWS, Google, Slack and Stripe keys, JWTs, private keys, `password=` style assignments, credentials embedded in URLs) are masked as `[REDACTED:kind]` before they leave the server.
-- **Writes** are confined to `captureDir`. Path traversal outside it is refused.
+- **Writes** are confined to the writable folders (`writableDirs`). Generated notes, hidden folders and paths outside the vault are refused, and deletes go to `.trash/`.
+- **Local models.** Embeddings and reranking run on your CPU. Note text is never sent to a model service.
 - **Audit.** Every call records timestamp, transport, client, session, tool, truncated arguments, note ids returned and redaction count.
 
 Found a vulnerability? Please report it privately, as described in [SECURITY.md](SECURITY.md).
@@ -299,9 +330,11 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 - [x] Remote access with OAuth 2.1, PKCE, password and authenticator code
 - [x] Secret redaction, scopes and an audit log
 - [x] Live index with a file watcher
-- [ ] Hybrid recall: local embeddings fused with BM25 ([#1](https://github.com/debashishthakur/brain-mcp/issues/1))
+- [x] Hybrid retrieval: local embeddings fused with BM25, a cross-encoder reranker, spelling correction ([#1](https://github.com/debashishthakur/brain-mcp/issues/1))
+- [x] Write, edit, move and delete tools for hand-written notes
+- [ ] Calibrate the "nothing relevant" floor so real questions are not refused ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
+- [ ] A faster reranker that keeps accuracy ([#10](https://github.com/debashishthakur/brain-mcp/issues/10))
 - [ ] Graph expansion with Personalized PageRank over wikilinks ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
-- [ ] Abstain when nothing is relevant ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
 - [ ] Harder eval questions ([#4](https://github.com/debashishthakur/brain-mcp/issues/4))
 - [ ] Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5))
 - [ ] Importers for other note tools ([#6](https://github.com/debashishthakur/brain-mcp/issues/6))
@@ -320,7 +353,8 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 | You want to learn | Start here |
 | --- | --- |
 | How an MCP server exposes tools, resources and prompts | `src/tools.ts`, `src/index.ts` |
-| Full-text search, BM25 and rank fusion | `src/vault/index.ts`, `src/context.ts` |
+| Hybrid search: BM25, embeddings, rank fusion | `src/vault/index.ts`, `src/context.ts` |
+| Running embedding and reranker models on a CPU | `src/vault/dense.ts` |
 | Turning wikilinks and frontmatter into a knowledge graph | `src/vault/parse.ts` |
 | OAuth 2.1 with PKCE, token rotation and TOTP | `src/auth/` |
 | Scopes and secret redaction | `src/policy.ts` |
@@ -330,9 +364,9 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 
 Each of these is an open issue with a suggested approach and a definition of done:
 
-- **Do local embeddings beat BM25 on personal notes**, where vocabulary is idiosyncratic and questions are paraphrased? ([#1](https://github.com/debashishthakur/brain-mcp/issues/1))
+- **When should retrieval abstain?** Hybrid search refuses all off-topic questions, but also some real ones. Calibrating the floor is open. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
+- **Which reranker gives the best accuracy per millisecond on a CPU?** A model six times faster finds the right note in 58% of everyday questions instead of 75%. ([#10](https://github.com/debashishthakur/brain-mcp/issues/10))
 - **Can the graph a vault already has replace an LLM-built one** for multi-hop questions? ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
-- **When should retrieval abstain?** Calibrating a "nothing relevant" floor. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
 - **How should AI memory handle facts that change over time?** ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
 - **How do you evaluate retrieval over personal data** without sharing that data? Start with a harder public eval set. ([#4](https://github.com/debashishthakur/brain-mcp/issues/4))
 
@@ -355,12 +389,13 @@ If you use brain-mcp in research or teaching, please cite it. GitHub's **Cite th
 brain-mcp/
 ├── src/
 │   ├── index.ts          entry point: stdio, --http, --oauth, --reindex
-│   ├── tools.ts          the nine MCP tools, resources and prompts
+│   ├── tools.ts          the 13 MCP tools, resources and prompts
 │   ├── context.ts        brain_context: fusion and packing under a budget
 │   ├── identity.ts       the persona bundle
 │   ├── memory.ts         brain_remember and near-duplicate checks
 │   ├── policy.ts         scopes and secret redaction
-│   ├── vault/            parsing notes and the SQLite FTS5 index
+│   ├── vault/            parsing notes, the SQLite index, hybrid ranking
+│   │   └── dense.ts      local embeddings and the reranker
 │   └── auth/             OAuth 2.1 server, login page, TOTP, token store
 ├── scripts/              smoke test, verification scripts, retrieval eval
 ├── example-vault/        a fictional vault used by every script

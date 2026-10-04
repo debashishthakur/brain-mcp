@@ -9,6 +9,16 @@ function cap(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n).trimEnd() + "\n[… truncated, read the full note with brain_read]";
 }
 
+/** The memory file is appended to, so over budget keep the newest facts: cut at a "## " fact heading. */
+function capNewest(s: string, n: number, file: string): string {
+  if (s.length <= n) return s;
+  const tail = s.slice(-n);
+  const at = tail.indexOf("\n## ");
+  const kept = at >= 0 ? tail.slice(at + 1) : tail;
+  const dropped = (s.slice(0, s.length - kept.length).match(/^## \d{4}-/gm) || []).length;
+  return `[… ${dropped} older fact(s) omitted for size; read them with brain_read "${file}"]\n\n${kept}`;
+}
+
 function fm(row: NoteRow): Record<string, unknown> {
   try {
     return JSON.parse(row.frontmatter) as Record<string, unknown>;
@@ -108,7 +118,7 @@ export function buildIdentity(cfg: ResolvedConfig, index: VaultIndex, policy: Po
   const captured = index.get(cfg.memoryFile);
   if (captured && policy.canRead(captured, p)) {
     used.push(captured.id);
-    take(`## Facts captured via brain_remember\n\n${cap(clean(captured), 12000)}\n`);
+    take(`## Facts captured via brain_remember\n\n${capNewest(clean(captured), 12000, cfg.memoryFile)}\n`);
   }
 
   // 4. Skills: how the owner has shaped Claude's behaviour
@@ -123,7 +133,8 @@ export function buildIdentity(cfg: ResolvedConfig, index: VaultIndex, policy: Po
   if (hubs.length) {
     const lines = hubs.map((h) => {
       const f = fm(h);
-      const count = f["note-count"] ?? "";
+      // Generated hubs carry note-count; hand-written ones (Notes/) don't, so count the project's notes live.
+      const count = f["note-count"] ?? index.list({ project: h.title, limit: 1000 }).length;
       const touched = f["last-touched"] instanceof Date ? (f["last-touched"] as Date).toISOString().slice(0, 10) : (f["last-touched"] ?? h.modified);
       return `- **${h.title}** — ${cap(firstParagraph(h.body), 240)} *(${count} notes, last touched ${touched})*`;
     });

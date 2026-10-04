@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
 import { parseNoteFile, splitSections, stripConnections, toId, type ParsedNote } from "./parse.js";
+import { DenseIndex } from "./dense.js";
 import type { ResolvedConfig } from "../config.js";
 
 export interface NoteRow {
@@ -100,6 +101,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts USING fts5(
   text,
   tokenize = 'porter unicode61'
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS sections_fts2 USING fts5(
+  note_id UNINDEXED,
+  ord UNINDEXED,
+  title,
+  heading,
+  text,
+  project,
+  topics,
+  tokenize = 'porter unicode61'
+);
 `;
 
 export interface SectionRow {
@@ -117,6 +128,49 @@ export interface SectionHit {
   snippet: string;
   score: number;
 }
+
+/** One section after hybrid ranking. `score` is the blended rank; `rprob` the reranker's own probability (NaN when it did not run). */
+export interface RankedSection {
+  note_id: string;
+  ord: number;
+  heading: string;
+  text: string;
+  note: NoteRow;
+  score: number;
+  rprob: number;
+  why: string[];
+}
+
+export interface RankResult {
+  sections: RankedSection[];
+  /** good: confident hit · thin: weak best hit, answer with a caveat · none: the vault is silent · lexical: models unavailable, keyword ranking only */
+  coverage: "good" | "thin" | "none" | "lexical";
+  corrections: string[];
+  terms: string[];
+  earlyExit: boolean;
+  ms: number;
+}
+
+export interface HybridSearchResult {
+  hits: SearchHit[];
+  coverage: RankResult["coverage"];
+  corrections: string[];
+}
+
+/** Reciprocal rank fusion over ranked lists keyed by section. */
+function rrf<T extends { key: string }>(lists: T[][], k = RRF_K_FUSION): { key: string; score: number; item: T }[] {
+  const acc = new Map<string, { score: number; item: T }>();
+  for (const l of lists) {
+    l.forEach((r, rank) => {
+      const cur = acc.get(r.key);
+      const add = 1 / (k + rank + 1);
+      if (cur) cur.score += add;
+      else acc.set(r.key, { score: add, item: r });
+    });
+  }
+  return [...acc.entries()].map(([key, v]) => ({ key, ...v })).sort((a, b) => b.score - a.score);
+}
+const RRF_K_FUSION = 60;
 
 const STOP = new Set(
   "a an and are as at be by for from how in is it of on or that the this to was what when where which who why will with do does did my me i you your our we can should would could about into over under after before between".split(" "),
@@ -149,6 +203,8 @@ export const TITLE_BONUS = 0.02;
 
 export class VaultIndex {
   readonly db: Database.Database;
+  /** Embeddings + reranker; null when `retrieval.hybrid` is off. Models load lazily on first use. */
+  readonly dense: DenseIndex | null;
   private watcher: FSWatcher | null = null;
   private pending = new Map<string, NodeJS.Timeout>();
   private listeners = new Set<(event: "upsert" | "remove", id: string) => void>();
@@ -157,6 +213,7 @@ export class VaultIndex {
     this.db = new Database(path.join(cfg.dataDir, "index.db"));
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
+    this.dense = cfg.retrieval.hybrid ? new DenseIndex(this.db, cfg.dataDir, cfg.retrieval) : null;
   }
 
   onChange(fn: (event: "upsert" | "remove", id: string) => void): () => void {
@@ -206,6 +263,8 @@ export class VaultIndex {
         removed++;
       }
     }
+    // Vectors are hash-keyed, so this only embeds sections whose text changed since the last run.
+    this.dense?.schedule(500);
     return { indexed, removed, ms: Date.now() - t0 };
   }
 
@@ -217,6 +276,7 @@ export class VaultIndex {
     }
     const note = parseNoteFile(this.cfg.vaultDir, abs);
     this.db.transaction(() => this.upsertParsed(note))();
+    this.dense?.schedule();
     for (const fn of this.listeners) fn("upsert", note.id);
     return note;
   }
@@ -230,6 +290,7 @@ export class VaultIndex {
     db.prepare("DELETE FROM links WHERE from_id = ?").run(n.id);
     db.prepare("DELETE FROM sections WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(n.id);
+    db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(n.id);
     db.prepare(
       `INSERT INTO notes (id,title,type,project,visibility,source,modified,captured,size,frontmatter,body,indexed_at)
        VALUES (@id,@title,@type,@project,@visibility,@source,@modified,@captured,@size,@frontmatter,@body,@indexed_at)
@@ -264,11 +325,19 @@ export class VaultIndex {
     for (const l of n.links) insLink.run(n.id, l.toLowerCase());
     const insSec = db.prepare("INSERT INTO sections (note_id,ord,heading,level,text) VALUES (?,?,?,?,?)");
     const insSecFts = db.prepare("INSERT INTO sections_fts (note_id,ord,heading,text) VALUES (?,?,?,?)");
+    // sections_fts2 carries the note title, project and topics on every window so a title match counts in section BM25.
+    const insSecFts2 = db.prepare("INSERT INTO sections_fts2 (note_id,ord,title,heading,text,project,topics) VALUES (?,?,?,?,?,?,?)");
+    const topics = n.topics.join(" ");
+    let count = 0;
     for (const s of splitSections(n.body)) {
       const heading = s.heading || n.title;
       insSec.run(n.id, s.ord, heading, s.level, s.text);
       insSecFts.run(n.id, s.ord, heading, s.text);
+      insSecFts2.run(n.id, s.ord, n.title, heading, s.text, n.project ?? "", topics);
+      count++;
     }
+    // Keep vectors for ordinals that still exist (their hash decides whether they are re-embedded); drop the rest.
+    this.dense?.forget(n.id, count);
   }
 
   removeId(id: string): void {
@@ -281,6 +350,8 @@ export class VaultIndex {
       this.db.prepare("DELETE FROM links WHERE from_id = ?").run(id);
       this.db.prepare("DELETE FROM sections WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(id);
+      this.db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(id);
+      this.dense?.forget(id);
     })();
     for (const fn of this.listeners) fn("remove", id);
   }
@@ -320,6 +391,7 @@ export class VaultIndex {
   }
 
   async close(): Promise<void> {
+    this.dense?.stop();
     await this.watcher?.close();
     this.db.close();
   }
@@ -440,6 +512,174 @@ export class VaultIndex {
       console.error(`[search-sections] ${(e as Error).message}`);
       return [];
     }
+  }
+
+  // ------------------------------------------------------------ hybrid ranking
+  /** Query terms plus alias expansions and spelling corrections (originals are kept alongside). */
+  private understand(q: string): { terms: string[]; corrections: string[] } {
+    const raw = queryTerms(q);
+    const out = new Set<string>();
+    const corrections: string[] = [];
+    const aliases = this.cfg.retrieval.aliases;
+    for (const t of raw) {
+      if (aliases[t]) for (const x of queryTerms(aliases[t])) out.add(x);
+      out.add(t);
+      const c = this.dense?.correct(t);
+      if (c) {
+        corrections.push(`${t}→${c}`);
+        out.add(c);
+      }
+    }
+    const lq = q.toLowerCase();
+    for (const [k, v] of Object.entries(aliases)) if (k.includes(" ") && lq.includes(k)) for (const x of queryTerms(v)) out.add(x);
+    return { terms: [...out], corrections };
+  }
+
+  private noteFilterOk(n: NoteRow | undefined, o: SearchOptions): n is NoteRow {
+    if (!n) return false;
+    if (o.project && (n.project ?? "").toLowerCase() !== o.project.toLowerCase()) return false;
+    if (o.type && n.type !== o.type) return false;
+    if (o.since && n.modified < o.since) return false;
+    if (o.until && n.modified > o.until) return false;
+    if (o.topic && !this.topicsOf(n.id).some((t) => t.toLowerCase() === o.topic!.toLowerCase())) return false;
+    return true;
+  }
+
+  /** Section BM25 over the OR of all terms (title x4, heading x2, project/topics x1.5), honouring the note filters. */
+  private bm25Sections(terms: string[], o: SearchOptions, limit: number): { key: string; note_id: string; ord: number }[] {
+    if (!terms.length) return [];
+    const params: Record<string, unknown> = { match: terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR "), limit };
+    const filter = this.buildFilter(o, params);
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT s.note_id, s.ord, bm25(sections_fts2, 0, 0, 4.0, 2.0, 1.0, 1.5, 1.5) AS score
+           FROM sections_fts2 s JOIN notes n ON n.id = s.note_id
+           WHERE sections_fts2 MATCH @match ${filter} ORDER BY score LIMIT @limit`,
+        )
+        .all(params) as { note_id: string; ord: number }[];
+      return rows.map((r) => ({ key: `${r.note_id}#${r.ord}`, note_id: r.note_id, ord: r.ord }));
+    } catch (e) {
+      console.error(`[rank] bm25: ${(e as Error).message}`);
+      return [];
+    }
+  }
+
+  /** Sections containing an ISO date verbatim: FTS5 splits 2026-09-24 into three weak tokens, so this list restores exact matches. */
+  private dateHits(dates: string[], o: SearchOptions): { key: string; note_id: string; ord: number }[] {
+    const stmt = this.db.prepare("SELECT note_id, ord FROM sections WHERE instr(text, ?) > 0 LIMIT 40");
+    const out: { key: string; note_id: string; ord: number }[] = [];
+    for (const d of dates) for (const r of stmt.all(d) as { note_id: string; ord: number }[]) if (this.noteFilterOk(this.get(r.note_id), o)) out.push({ key: `${r.note_id}#${r.ord}`, ...r });
+    return out;
+  }
+
+  /**
+   * Hybrid section ranking: aliases + spelling → BM25 ∥ dense ∥ exact-date lists → RRF → cross-encoder
+   * rerank of the top `rerankN` (only the top 3 when BM25 and dense already agree on #1) → blended score
+   * → gate. Falls back to keyword-only fusion (coverage "lexical") when the models are unavailable.
+   */
+  async rankSections(query: string, o: SearchOptions & { k?: number } = {}): Promise<RankResult> {
+    const t0 = Date.now();
+    const rc = this.cfg.retrieval;
+    const k = Math.min(Math.max(o.k ?? 10, 1), 50);
+    const u = this.understand(query);
+    const dates = query.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
+    const lex = this.bm25Sections(u.terms, o, 40);
+    const exact = dates.length ? this.dateHits(dates, o) : [];
+    const noteCache = new Map<string, NoteRow | undefined>();
+    const noteOf = (id: string) => {
+      if (!noteCache.has(id)) noteCache.set(id, this.get(id));
+      return noteCache.get(id);
+    };
+    const modelsOk = this.dense ? await this.dense.ready() : false;
+    const den = modelsOk
+      ? (await this.dense!.search(query, 40)).filter((h) => this.noteFilterOk(noteOf(h.note_id), o)).map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }))
+      : [];
+    // Note-level BM25 (title x4 over the whole body) as a fourth list, anchored on each note's first window:
+    // a note whose title names the subject still competes when no single window carries every term.
+    const noteList = this.search(u.terms.join(" "), { ...o, limit: 15 })
+      .filter((h) => this.noteFilterOk(noteOf(h.id), o))
+      .map((h) => ({ key: `${h.id}#0`, note_id: h.id, ord: 0 }));
+    const lists = [lex, den, exact, noteList].filter((l) => l.length);
+    const fused = rrf(lists);
+    const secStmt = this.db.prepare("SELECT heading, text FROM sections WHERE note_id = ? AND ord = ?");
+    const materialise = (item: { note_id: string; ord: number }, score: number, rprob: number, why: string[]): RankedSection | null => {
+      const note = noteOf(item.note_id);
+      const sec = secStmt.get(item.note_id, item.ord) as { heading: string; text: string } | undefined;
+      if (!note || !sec) return null;
+      return { note_id: item.note_id, ord: item.ord, heading: sec.heading, text: sec.text, note, score, rprob, why };
+    };
+    const done = (sections: RankedSection[], coverage: RankResult["coverage"], earlyExit: boolean): RankResult => ({
+      sections,
+      coverage,
+      corrections: u.corrections,
+      terms: u.terms,
+      earlyExit,
+      ms: Date.now() - t0,
+    });
+    if (!fused.length) return done([], modelsOk ? "none" : "lexical", false);
+    const fusedTop = fused[0].score;
+
+    if (!modelsOk) {
+      const out: RankedSection[] = [];
+      for (const f of fused.slice(0, k)) {
+        const s = materialise(f.item, f.score / fusedTop, NaN, ["keyword fusion"]);
+        if (s) out.push(s);
+      }
+      return done(out, "lexical", false);
+    }
+
+    const cands = fused.slice(0, rc.rerankN);
+    const agree = rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key;
+    const passage = (c: { item: { note_id: string; ord: number } }) => {
+      const note = noteOf(c.item.note_id);
+      const sec = secStmt.get(c.item.note_id, c.item.ord) as { heading: string; text: string } | undefined;
+      const head = sec && note && sec.heading.toLowerCase() !== note.title.toLowerCase() ? ` / ${sec.heading}` : "";
+      return `${note?.title ?? ""}${head}\n${sec?.text ?? ""}`;
+    };
+    let probs: number[];
+    if (agree) {
+      // Lexical and dense agree on the best section: rerank only the head for a calibrated gate and
+      // ordering; the tail keeps its fused order, scaled strictly below the weakest reranked item.
+      const head = await this.dense!.rerank(query, cands.slice(0, 3).map(passage));
+      const headMin = Math.min(...head);
+      probs = cands.map((c, i) => (i < head.length ? head[i] : 0.9 * headMin * (c.score / fusedTop)));
+    } else {
+      probs = await this.dense!.rerank(query, cands.map(passage));
+    }
+    const reranked = agree ? Math.min(3, cands.length) : cands.length;
+    const topR = Math.max(...probs.slice(0, reranked));
+    if (topR < rc.floor) return done([], "none", agree);
+    const scored = cands.map((c, i) => ({ c, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored[0].score;
+    const out: RankedSection[] = [];
+    for (const s of scored) {
+      if (s.score < Math.max(0.02, rc.keepRatio * top)) break;
+      const why = [s.reranked ? `rerank ${s.prob.toFixed(2)}` : "fused tail", ...(lex.some((x) => x.key === s.c.key) ? ["keyword"] : []), ...(den.some((x) => x.key === s.c.key) ? ["semantic"] : []), ...(exact.some((x) => x.key === s.c.key) ? ["exact date"] : []), ...(noteList.some((x) => x.key === s.c.key) ? ["title"] : [])];
+      const sec = materialise(s.c.item, s.score, s.reranked ? s.prob : NaN, why);
+      if (sec) out.push(sec);
+      if (out.length >= k) break;
+    }
+    return done(out, topR >= 0.3 ? "good" : "thin", agree);
+  }
+
+  /** Note-level hybrid search: a note scores as its best section, which also supplies the snippet. */
+  async searchHybrid(query: string, o: SearchOptions = {}): Promise<HybridSearchResult> {
+    const limit = Math.min(Math.max(o.limit ?? 10, 1), 50);
+    const r = await this.rankSections(query, { ...o, k: Math.min(limit * 3, 50) });
+    const byNote = new Map<string, RankedSection>();
+    for (const s of r.sections) if (!byNote.has(s.note_id)) byNote.set(s.note_id, s);
+    const hits: SearchHit[] = [...byNote.values()].slice(0, limit).map((s) => ({
+      id: s.note_id,
+      title: s.note.title,
+      type: s.note.type,
+      project: s.note.project,
+      modified: s.note.modified,
+      snippet: `${s.heading && s.heading !== s.note.title ? `[${s.heading}] ` : ""}${s.text.replace(/^#+\s.*\n?/, "").replace(/\s+/g, " ").slice(0, 220)}`,
+      score: s.score,
+    }));
+    return { hits, coverage: r.coverage, corrections: r.corrections };
   }
 
   section(noteId: string, ord: number): SectionRow | undefined {

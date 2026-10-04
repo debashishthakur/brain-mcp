@@ -22,6 +22,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # The embedding and reranker models (about 300 MB) are downloaded once and cached.
+      - uses: actions/cache@v6
+        with:
+          path: data/models
+          key: models-${{ hashFiles('src/vault/dense.ts', 'brain.config.json') }}
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck
@@ -31,9 +36,15 @@ jobs:
         run: node scripts/verify.mjs
       - name: Memory and identity
         run: node scripts/verify-memory.mjs
+      - name: Write, edit, move and delete tools
+        run: node scripts/verify-write.mjs
       - name: OAuth 2.1 flow
         run: node scripts/verify-oauth.mjs
-      - name: Retrieval eval
+      - name: Hybrid retrieval (models, refusal, spelling, identifiers)
+        run: node scripts/verify-hybrid.mjs
+      - name: Retrieval eval, keyword vs hybrid
         run: node scripts/eval-retrieval.mjs
+      - name: Hard eval set
+        run: node scripts/eval-hybrid.mjs
       - name: Vault is restored
         run: git diff --exit-code -- example-vault

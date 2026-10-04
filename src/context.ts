@@ -1,5 +1,5 @@
 import type { ResolvedConfig } from "./config.js";
-import { queryTerms, titleOverlap, RRF_K, TITLE_BONUS, type VaultIndex, type NoteRow, type SectionHit } from "./vault/index.js";
+import { queryTerms, titleOverlap, RRF_K, TITLE_BONUS, type VaultIndex, type NoteRow, type SectionHit, type RankedSection } from "./vault/index.js";
 import type { Policy, Principal } from "./policy.js";
 
 const STRUCTURAL = new Set(["hub", "concept", "moc", "meta", "guide"]);
@@ -161,4 +161,84 @@ export function buildContext(cfg: ResolvedConfig, index: VaultIndex, policy: Pol
     }
   });
   return { text: parts.join("\n"), notes: order, candidates: ranked.length, included: picked.length };
+}
+
+export interface HybridContextResult extends ContextResult {
+  coverage: "good" | "thin" | "none" | "lexical";
+}
+
+/**
+ * Context pack from hybrid ranking (BM25 + embeddings + reranker, see VaultIndex.rankSections).
+ * Same rendering as buildContext, but the pack is bounded by relevance, not only by budget: the
+ * reranker's floor turns an off-topic question into an explicit "the vault does not record this".
+ * When the models are unavailable the keyword pipeline above answers instead.
+ */
+export async function buildContextHybrid(cfg: ResolvedConfig, index: VaultIndex, policy: Policy, p: Principal, question: string, o: ContextOptions = {}): Promise<HybridContextResult> {
+  const c = cfg.context;
+  const budget = Math.max(2000, Math.min(o.budgetChars ?? c.budgetChars, 60000));
+  const perNote = Math.max(1, Math.min(o.maxSectionsPerNote ?? c.maxSectionsPerNote, 6));
+  const r = await index.rankSections(question, { project: o.project, k: 24 });
+  if (r.coverage === "lexical") return { ...buildContext(cfg, index, policy, p, question, o), coverage: "lexical" };
+  const readable = r.sections.filter((s) => policy.canRead(s.note, p));
+  if (r.coverage === "none" || !readable.length) {
+    return {
+      text:
+        `The vault does not record anything about "${question}" (coverage: none). Say so rather than answering from general knowledge. ` +
+        `If the wording might differ from the notes, try brain_search with other terms, or brain_project to browse a project.`,
+      notes: [],
+      candidates: r.sections.length,
+      included: 0,
+      coverage: "none",
+    };
+  }
+
+  // Pack: relevance order, at most `perNote` sections per note, at most 10 sections, under the budget.
+  const perNoteCount = new Map<string, number>();
+  const picked: RankedSection[] = [];
+  let used = 0;
+  for (const s of readable) {
+    const n = perNoteCount.get(s.note_id) ?? 0;
+    if (n >= perNote) continue;
+    const len = Math.min(s.text.length, c.maxSectionChars);
+    if (picked.length && used + len > budget) continue;
+    picked.push(s);
+    perNoteCount.set(s.note_id, n + 1);
+    used += len;
+    if (picked.length >= 10 || used >= budget) break;
+  }
+
+  const order: string[] = [];
+  const groups = new Map<string, RankedSection[]>();
+  for (const s of picked) {
+    if (!groups.has(s.note_id)) {
+      groups.set(s.note_id, []);
+      order.push(s.note_id);
+    }
+    groups.get(s.note_id)!.push(s);
+  }
+  const parts: string[] = [];
+  parts.push(`# Context for: ${question}\n`);
+  const spelling = r.corrections.length ? ` Spelling read as: ${r.corrections.join(", ")}.` : "";
+  const caveat = r.coverage === "thin" ? " The best match is weak: treat this as partial evidence and say that the vault may not record it directly." : "";
+  parts.push(`${picked.length} section(s) from ${order.length} note(s) by hybrid retrieval (keyword + semantic + reranker). Coverage: ${r.coverage}.${spelling}${caveat} Cite note ids when you use them.\n`);
+  parts.push(`## Sources\n`);
+  order.forEach((id, i) => {
+    const g = groups.get(id)!;
+    const n = g[0].note;
+    const heads = g.map((s) => s.heading).join(" · ");
+    const why = g[0].why.join(", ");
+    parts.push(`${i + 1}. **${n.title}** \`${id}\` — ${n.type}${n.project ? ` · ${n.project}` : ""} · ${n.modified} — ${heads} (${why})`);
+  });
+  parts.push("");
+  order.forEach((id, i) => {
+    const g = groups.get(id)!.sort((a, b) => a.ord - b.ord);
+    const n = g[0].note;
+    parts.push(`---\n## [${i + 1}] ${n.title}\n\`${id}\`\n`);
+    for (const s of g) {
+      let text = s.text;
+      if (text.length > c.maxSectionChars) text = text.slice(0, c.maxSectionChars).trimEnd() + `\n[… section truncated; brain_read note="${id}" section="${s.heading}" for the rest]`;
+      parts.push(policy.redact(text).text + "\n");
+    }
+  });
+  return { text: parts.join("\n"), notes: order, candidates: r.sections.length, included: picked.length, coverage: r.coverage };
 }

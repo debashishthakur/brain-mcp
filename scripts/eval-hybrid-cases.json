@@ -1,0 +1,17 @@
+[
+  { "cls": "paraphrase", "q": "why does the money tracker keep its data in a real database server", "gold": ["Projects/Harbor Ledger/Decisions/Use PostgreSQL for the ledger.md"] },
+  { "cls": "paraphrase", "q": "the disk on the home server failed, how do I get my transactions back", "gold": ["Projects/Harbor Ledger/Runbooks/Restore the ledger database.md"] },
+  { "cls": "paraphrase", "q": "why is the bird audio never sent to an online service", "gold": ["Projects/Kestrel/Decisions/Run bird detection on the device.md"] },
+  { "cls": "paraphrase", "q": "how do I like my pull requests reviewed", "gold": ["Projects/Assistant Memory/Notes/Code review preferences.md"] },
+  { "cls": "typo", "q": "postgress restore steps", "gold": ["Projects/Harbor Ledger/Runbooks/Restore the ledger database.md"] },
+  { "cls": "typo", "q": "kestral progress this month", "gold": ["Projects/Kestrel/Progress/Kestrel progress 2026-09.md"] },
+  { "cls": "identifier", "q": "harbor-import.timer", "gold": ["Projects/Harbor Ledger/Runbooks/Restore the ledger database.md"] },
+  { "cls": "identifier", "q": "budgets.yaml", "gold": ["Projects/Harbor Ledger/Progress/Harbor Ledger progress 2026-09.md"] },
+  { "cls": "date", "q": "what was decided on 2026-09-06", "gold": ["Projects/Harbor Ledger/Decisions/Use PostgreSQL for the ledger.md"] },
+  { "cls": "multihop", "q": "where are the backups of the ledger project's database kept", "gold": ["Projects/Assistant Memory/Notes/Home server facts.md", "Projects/Harbor Ledger/Runbooks/Restore the ledger database.md"] },
+  { "cls": "alias", "q": "pg backup", "gold": ["Projects/Harbor Ledger/Runbooks/Restore the ledger database.md", "Projects/Assistant Memory/Notes/Home server facts.md", "Concepts/PostgreSQL.md"] },
+  { "cls": "alias", "q": "py environments", "gold": ["Captures/Memory.md"] },
+  { "cls": "offtopic", "q": "best pizza in rome", "gold": [] },
+  { "cls": "offtopic", "q": "recipe for chicken biryani", "gold": [] },
+  { "cls": "offtopic", "q": "who won the football world cup", "gold": [] }
+]

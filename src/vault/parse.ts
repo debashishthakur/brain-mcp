@@ -127,7 +127,26 @@ export interface Section {
   text: string; // includes the heading line
 }
 
-/** Split a note body into heading-delimited sections, skipping code fences and the generated Connections trailer. */
+/** Longest section the ranker sees. Long sections are windowed at paragraph boundaries so a fact late in a
+ *  heading-less note is still inside the embedder's and reranker's view; later windows keep the heading. */
+export const SECTION_WINDOW_CHARS = 1200;
+
+function windows(text: string, max = SECTION_WINDOW_CHARS): string[] {
+  if (text.length <= max) return [text];
+  const out: string[] = [];
+  let cur = "";
+  for (const para of text.split(/\n\s*\n/)) {
+    if (cur && (cur + "\n\n" + para).length > max) {
+      out.push(cur);
+      cur = para;
+    } else cur = cur ? cur + "\n\n" + para : para;
+  }
+  if (cur) out.push(cur);
+  // A single paragraph (or table, or code block) longer than 1.5 windows is cut hard.
+  return out.flatMap((w) => (w.length > max * 1.5 ? (w.match(new RegExp(`[\\s\\S]{1,${max}}`, "g")) ?? [w]) : [w]));
+}
+
+/** Split a note body into heading-delimited sections (windowed, see SECTION_WINDOW_CHARS), skipping code fences and the generated Connections trailer. */
 export function splitSections(body: string): Section[] {
   const lines = stripConnections(body).split(/\r?\n/);
   const out: Section[] = [];
@@ -137,7 +156,7 @@ export function splitSections(body: string): Section[] {
   let inFence = false;
   const flush = () => {
     const text = cur.join("\n").trim();
-    if (text) out.push({ ord: out.length, heading, level, text });
+    if (text) for (const w of windows(text)) out.push({ ord: out.length, heading, level, text: w });
     cur = [];
   };
   for (const line of lines) {
