@@ -1,0 +1,32 @@
+services:
+  brain-mcp:
+    build: .
+    ports:
+      - "3737:3737"
+    environment:
+      BRAIN_MCP_CONFIG: /app/brain.config.json
+      BRAIN_MCP_DATA_DIR: /app/data
+      BRAIN_MCP_LOG_DIR: /app/logs
+      BRAIN_MCP_AUTH_MODE: token
+      # Bind all interfaces inside the container so the published port works.
+      # Keep the host port on loopback (127.0.0.1:3737) or a private network.
+      BRAIN_MCP_HOST: 0.0.0.0
+      BRAIN_MCP_TOKEN: ${BRAIN_MCP_TOKEN:?set BRAIN_MCP_TOKEN to a random secret (32+ chars)}
+    volumes:
+      - ./brain.config.json:/app/brain.config.json:ro
+      - ./example-vault:/app/example-vault:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3737/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

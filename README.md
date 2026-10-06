@@ -175,6 +175,21 @@ If `npm install` reports held-back install scripts, the two packages that need t
 
 </details>
 
+## Run with Docker
+
+Token-mode HTTP server in a container, using the example vault by default.
+
+```bash
+export BRAIN_MCP_TOKEN="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
+docker compose up --build
+```
+
+The compose file publishes `127.0.0.1`-friendly port `3737`, mounts `brain.config.json` and `example-vault` read-only, and keeps `data/` and `logs/` on the host. Health is checked at `GET /healthz`.
+
+**Keep the service private.** The container binds `0.0.0.0` only so Docker can publish the port. Publish it on loopback (`127.0.0.1:3737:3737`) or a private network such as Tailscale — do not expose it to the public internet. Anything public should use OAuth (`--oauth`) behind a TLS proxy, as in the security model below.
+
+To use your own vault, point `vaultPath` at a host mount (or replace the `example-vault` volume) and keep `BRAIN_MCP_CONFIG` on a config file whose `vaultPath` matches that mount.
+
 ## Retrieval eval
 
 Two scripts score retrieval on the example vault, keyword and hybrid side by side. Results are deterministic and reproducible from a fresh clone.
@@ -379,7 +394,7 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 - [ ] A faster reranker that keeps accuracy ([#10](https://github.com/debashishthakur/brain-mcp/issues/10))
 - [ ] Graph expansion with Personalized PageRank over wikilinks ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
 - [ ] Harder eval questions ([#4](https://github.com/debashishthakur/brain-mcp/issues/4))
-- [ ] Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5))
+- [x] Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5)) — `Dockerfile` + `docker-compose.yml`, see [Run with Docker](#run-with-docker)
 - [ ] Importers for other note tools ([#6](https://github.com/debashishthakur/brain-mcp/issues/6))
 - [ ] Passkey sign-in ([#7](https://github.com/debashishthakur/brain-mcp/issues/7))
 - [ ] Temporal memory ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
