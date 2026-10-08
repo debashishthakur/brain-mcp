@@ -47,8 +47,11 @@ jobs:
           PUBLISHER: v1.8.1
         run: |
           version="$(node -p "require('./server.json').version")"
-          listed="$(curl -sS 'https://registry.modelcontextprotocol.io/v0/servers?search=io.github.debashishthakur/brain-mcp&version=latest' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).servers?.[0]?.server?.version ?? ''))")"
-          if [ "$listed" = "$version" ]; then echo "$version is already in the MCP Registry"; exit 0; fi
+          # Ask for this exact version: the search endpoint's "latest" lags behind a fresh publish.
+          code="$(curl -s -o /dev/null -w '%{http_code}' "https://registry.modelcontextprotocol.io/v0/servers/io.github.debashishthakur%2Fbrain-mcp/versions/$version")"
+          if [ "$code" = "200" ]; then echo "$version is already in the MCP Registry"; exit 0; fi
+          # The registry checks the npm package, and npm takes a minute or two to show a new version.
+          for i in $(seq 1 30); do npm view "debawho-brain-mcp@$version" version >/dev/null 2>&1 && break; echo "waiting for npm to show $version"; sleep 20; done
           base="https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER"
           curl -sSLO "$base/mcp-publisher_linux_amd64.tar.gz"
           curl -sSLO "$base/registry_${PUBLISHER#v}_checksums.txt"
