@@ -71,10 +71,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-        env:
-          ONNXRUNTIME_NODE_INSTALL: skip
-          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+      # better-sqlite3 ships prebuilt binaries, but the lockfile flags an install script, so npm ci would compile it
+      # from source and fail on a Windows runner without a C++ toolchain. Nothing here needs install scripts. A user's
+      # install of the package does not compile it, and verify-package.mjs installs the tarball with scripts on.
+      - run: npm ci --ignore-scripts
       - run: npm run build
       # What `npx debawho-brain-mcp init` gives a new user: pack, install, init, serve, and no state in the package folder.
       - name: Pack, install and run as a new user
