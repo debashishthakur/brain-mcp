@@ -51,7 +51,7 @@ if (flag("--help") || flag("-h")) {
   --vault <path>    your existing vault, or a new folder for a starter vault (default: ${shown(STARTER)})
   --config <file>   where to write the config (default: ${shown(DEFAULT_CONFIG)})
   --yes             ask nothing, take the defaults
-  --force           replace an existing config${INSTALLED ? "\n  --no-models       skip fetching the search models now; the server fetches them on first use" : ""}`);
+  --force           replace an existing config${INSTALLED ? "\n  --no-smart-search keyword search only: skip the smart-search download (--no-models works too)" : ""}`);
   process.exit(0);
 }
 
@@ -201,6 +201,13 @@ const server = INSTALLED
 if (!isDefault) server.args.push("--config", configPath);
 const addArgs = ["mcp", "add", "--scope", "user", "brain", "--", server.command, ...server.args];
 const addLine = `claude ${addArgs.map((a) => (a === ENTRY || a === configPath ? `"${a}"` : quote(a))).join(" ")}`;
+// Smart search is an add-on for an npm install, asked for here so every question comes before the downloads.
+// A clone has it already, as a dev dependency. Without a terminal the answer is yes, like the other defaults.
+const smart = !INSTALLED
+  ? true
+  : flag("--no-smart-search") || flag("--no-models") || process.env.BRAIN_MCP_HYBRID === "0"
+    ? false
+    : await confirm("Turn on smart search? Local models rank results by meaning: a one-time download of about 100-200 MB, plus 300 MB of models.", true, true);
 const connect = rl && hasClaude() && (await confirm("Connect Claude Code now?", true));
 rl?.close();
 
@@ -215,22 +222,17 @@ const config = {
   ...base,
   owner: name,
   identity: { ...base.identity, profileNote },
+  ...(smart ? {} : { retrieval: { hybrid: false } }),
 };
 fs.mkdirSync(path.dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
 
-// Index the vault and fetch the models now, so the first question from a client is not stuck behind a download.
-if (INSTALLED && !flag("--no-models") && process.env.BRAIN_MCP_HYBRID !== "0") {
-  console.log("\nIndexing your notes and fetching the search models (about 300 MB, only the first time)...\n");
-  const warm = () => spawnSync(process.execPath, [ENTRY, "--reindex", "--warm", "--config", configPath], { stdio: ["ignore", "inherit", "inherit"] }).status === 0;
-  // One retry: a dropped connection is the usual failure, and files that finished downloading are kept.
-  let ok = warm();
-  if (!ok) {
-    console.log("\nRetrying once...\n");
-    ok = warm();
-  }
-  if (!ok)
-    console.log(`\nThe models could not be fetched now. Search works by keyword until the server fetches them on first use,\nor run this again: npx ${PKG} --reindex --warm`);
+// Install the add-on and fetch the models now, so the first question from a client is not stuck behind a download.
+// If that fails the config switches to keyword search, so the server doesn't try to load what isn't there.
+let smartOn = smart && !INSTALLED;
+if (smart && INSTALLED) {
+  smartOn = spawnSync(process.execPath, [ENTRY, "smart-search", "--config", configPath], { stdio: ["ignore", "inherit", "inherit"] }).status === 0;
+  if (!smartOn) fs.writeFileSync(configPath, JSON.stringify({ ...config, retrieval: { hybrid: false } }, null, 2) + "\n");
 }
 
 let connected = false;
@@ -249,6 +251,8 @@ const lines = [
     : `  Profile   none yet: add a note titled "${profileNote}" and it becomes your profile`,
 ];
 if (created.length) lines.push(`  Created   ${created.map((f) => path.relative(vaultDir, f)).join(", ")}`);
+if (INSTALLED)
+  lines.push(smartOn ? "  Search    smart: keywords, meaning and a reranker" : `  Search    keywords only. Add smart search any time: npx ${PKG} smart-search`);
 if (!fs.existsSync(ENTRY)) lines.push("", "Build the server first:", "", "  npm run build");
 if (connected) lines.push("", "Claude Code is connected (server name: brain).");
 else lines.push("", "Connect Claude Code:", "", `  ${addLine}`);

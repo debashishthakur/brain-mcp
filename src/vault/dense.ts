@@ -119,7 +119,9 @@ export class DenseIndex {
       this.loading = (async () => {
         try {
           const t0 = Date.now();
-          const tf = await import("@huggingface/transformers");
+          // Loaded here rather than at the top: config.ts imports this file, and smart-search.ts imports config.ts.
+          const { loadTransformers } = await import("../smart-search.js");
+          const tf = await loadTransformers();
           tf.env.cacheDir = this.modelsDir;
           const pipe = (await tf.pipeline("feature-extraction", this.cfg.embedModel, { dtype: "q8" })) as unknown as Embedder;
           const tok = await tf.AutoTokenizer.from_pretrained(this.cfg.rerankModel);

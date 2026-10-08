@@ -138,7 +138,9 @@ Requires **Node 22 or newer**. One command sets it up on your notes:
 npx debawho-brain-mcp init
 ```
 
-It lists the Obsidian vaults on your machine and asks which one to serve (or makes a starter vault in `~/second-brain`), asks your name, fetches the two search models once (about 300 MB), and offers to connect Claude Code for you. Your notes stay where they are; the config, index and logs go in `~/.brain-mcp/`. Then ask Claude "what do you know about me?"
+It lists the Obsidian vaults on your machine and asks which one to serve (or makes a starter vault in `~/second-brain`), asks your name, offers smart search, and offers to connect Claude Code for you. Your notes stay where they are; the config, index and logs go in `~/.brain-mcp/`. Then ask Claude "what do you know about me?"
+
+The package itself is about 50 MB and searches by keyword. **Smart search** adds two local models that rank by meaning, and puts the right note first more often (67% against 42% on the example vault's eval). It is a one-time download of 100 to 200 MB for your platform's ONNX runtime, plus 300 MB of models, all kept in `~/.brain-mcp/`. `init` asks for it; add it later with `npx debawho-brain-mcp smart-search`, or take it out with `npx debawho-brain-mcp smart-search remove`.
 
 To connect a client yourself, Claude Code:
 
@@ -202,6 +204,7 @@ node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway a
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
+node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
 node scripts/eval-hybrid.mjs     # 15 harder questions: paraphrase, typo, identifier, date, multi-hop, alias, off-topic
 node scripts/debug-rank.mjs "your question"   # trace one query through every ranking step
@@ -213,7 +216,7 @@ If `npm install` reports held-back install scripts, the two packages that need t
 
 ## Run with Docker
 
-Token-mode HTTP server in a container, using the example vault by default.
+Token-mode HTTP server in a container, using the example vault by default. The image is Alpine-based and searches by keyword, because the ONNX runtime behind smart search needs glibc.
 
 ```bash
 export BRAIN_MCP_TOKEN="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"

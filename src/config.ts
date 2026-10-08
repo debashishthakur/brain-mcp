@@ -83,6 +83,9 @@ export const HOME_DIR = path.resolve(process.env.BRAIN_MCP_HOME ?? path.join(os.
 export const HOME_CONFIG = path.join(HOME_DIR, "config.json");
 /** Where data/ and logs/ go when nothing else says: beside the package in a clone, in HOME_DIR when installed. */
 const STATE_DIR = INSTALLED ? HOME_DIR : ROOT_DIR;
+/** The smart-search add-on (transformers.js and the ONNX runtime for this OS), installed on request by `smart-search`. */
+export const SMART_SEARCH_DIR = path.join(HOME_DIR, "smart-search");
+export const VERSION = (JSON.parse(fs.readFileSync(path.join(ROOT_DIR, "package.json"), "utf8")) as { version: string }).version;
 
 function defaultConfig(): string {
   if (fs.existsSync(LOCAL_CONFIG)) return LOCAL_CONFIG;
@@ -90,8 +93,13 @@ function defaultConfig(): string {
   return DEFAULT_CONFIG;
 }
 
+/** The config file loadConfig would read, without reading it. */
+export function resolveConfigPath(overridePath?: string): string {
+  return path.resolve(overridePath ?? process.env.BRAIN_MCP_CONFIG ?? defaultConfig());
+}
+
 export function loadConfig(overridePath?: string): ResolvedConfig {
-  const cfgPath = path.resolve(overridePath ?? process.env.BRAIN_MCP_CONFIG ?? defaultConfig());
+  const cfgPath = resolveConfigPath(overridePath);
   const raw = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as BrainConfig;
   const vaultDir = path.resolve(path.dirname(cfgPath), raw.vaultPath);
   if (!fs.existsSync(vaultDir)) throw new Error(`Vault path does not exist: ${vaultDir}`);
