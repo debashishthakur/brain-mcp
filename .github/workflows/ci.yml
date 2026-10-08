@@ -79,3 +79,15 @@ jobs:
       # What `npx debawho-brain-mcp init` gives a new user: pack, install, init, serve, and no state in the package folder.
       - name: Pack, install and run as a new user
         run: node scripts/verify-package.mjs
+      # The search models (about 300 MB), cached per OS and fetched once through the clone's own transformers.js.
+      - uses: actions/cache@v6
+        with:
+          path: data/models
+          key: models-${{ runner.os }}-${{ hashFiles('src/vault/dense.ts', 'brain.config.json') }}
+      - name: Fetch the search models
+        run: node dist/index.js --reindex --warm
+      # The add-on as a new user gets it: this OS's ONNX runtime only, no CUDA on Linux, hybrid ranking, then remove.
+      - name: Smart-search add-on
+        run: node scripts/verify-smart-search.mjs
+        env:
+          SMART_SEARCH_MODELS: data/models

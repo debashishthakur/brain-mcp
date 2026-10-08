@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig, ROOT_DIR } from "./config.js";
+import { loadConfig, ROOT_DIR, VERSION } from "./config.js";
 import { VaultIndex } from "./vault/index.js";
 import { Policy } from "./policy.js";
 import { Audit } from "./audit.js";
@@ -23,6 +22,7 @@ const has = (name: string) => process.argv.includes(name);
 const HELP = `debawho-brain-mcp: your Obsidian vault as live context for Claude and any MCP client
 
   init                point it at your notes and connect Claude Code (run this first)
+  smart-search        add smart search: local models that rank by meaning ('smart-search remove' takes it out)
   --stdio             serve over stdio, which is what MCP clients run (the default)
   --http              serve over HTTP on 127.0.0.1:3737, bearer token required
   --oauth             serve over HTTP with OAuth 2.1, for remote clients
@@ -39,13 +39,17 @@ async function main(): Promise<void> {
     await import(pathToFileURL(path.join(ROOT_DIR, "scripts", "setup.mjs")).href);
     return;
   }
+  if (process.argv[2] === "smart-search") {
+    const { runSmartSearch } = await import("./smart-search.js");
+    process.exitCode = await runSmartSearch(process.argv.slice(3), path.join(ROOT_DIR, "dist", "index.js"));
+    return;
+  }
   if (has("--help")) {
     process.stdout.write(HELP);
     return;
   }
   if (has("--version")) {
-    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, "package.json"), "utf8")) as { version: string };
-    process.stdout.write(pkg.version + "\n");
+    process.stdout.write(VERSION + "\n");
     return;
   }
   if (has("--gen-token")) {

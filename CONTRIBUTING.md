@@ -39,6 +39,7 @@ node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway a
 node scripts/verify-hybrid.mjs   # hybrid search checks
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
+node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
 node scripts/eval-retrieval.mjs  # retrieval quality, keyword vs hybrid
 node scripts/eval-hybrid.mjs     # the harder question set
 ```

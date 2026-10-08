@@ -3,7 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ResolvedConfig } from "./config.js";
+import { VERSION, type ResolvedConfig } from "./config.js";
 import type { VaultIndex, NoteRow } from "./vault/index.js";
 import { section, stripConnections, stripTitleHeading, firstParagraph } from "./vault/parse.js";
 import { Policy, type Principal, ALL_SCOPES } from "./policy.js";
@@ -106,7 +106,7 @@ export function instructions(cfg: ResolvedConfig): string {
 
 export function createBrainServer(d: Deps): McpServer {
   const { cfg, index, policy, audit } = d;
-  const server = new McpServer({ name: "second-brain", version: "0.1.0" }, { instructions: instructions(cfg) });
+  const server = new McpServer({ name: "second-brain", version: VERSION }, { instructions: instructions(cfg) });
 
   const readable = (rows: NoteRow[], p: Principal) => rows.filter((n) => policy.canRead(n, p));
 
