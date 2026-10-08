@@ -1,21 +1,33 @@
 #!/usr/bin/env node
-// `npm run setup`: make brain-mcp yours. Asks for your name and where your notes live, then writes
-// brain.config.local.json (kept out of git), which the server uses instead of the example vault. With no
-// existing vault it creates a starter one from templates/starter-vault. The example vault and every
-// check keep working either way.
+// `npm run setup` in a clone, `npx debawho-brain-mcp init` from npm: make brain-mcp yours. Asks for your
+// name and where your notes live, then writes your config, which the server uses instead of the example
+// vault. With no existing vault it creates a starter one from templates/starter-vault.
+//
+// A clone writes brain.config.local.json (kept out of git), so the example vault and every check keep
+// working. An npm install writes ~/.brain-mcp/config.json, since npx can wipe its own folder at any time,
+// fetches the search models once, and offers to connect Claude Code.
 //
 //   npm run setup
 //   npm run setup -- --name "Ada Lovelace" --vault ~/Notes --yes
+//   npx debawho-brain-mcp init
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE = path.join(ROOT, "templates", "starter-vault");
 const ENTRY = path.join(ROOT, "dist", "index.js");
+const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).name;
+// Same rules as src/config.ts, which this script cannot import before the first build.
+const INSTALLED = ROOT.split(path.sep).includes("node_modules");
+const HOME_DIR = path.resolve(process.env.BRAIN_MCP_HOME ?? path.join(os.homedir(), ".brain-mcp"));
+const DEFAULT_CONFIG = INSTALLED ? path.join(HOME_DIR, "config.json") : path.join(ROOT, "brain.config.local.json");
+const STARTER = INSTALLED ? path.join(os.homedir(), "second-brain") : path.join(ROOT, "my-vault");
+const USAGE = INSTALLED ? `npx ${PKG} init` : "npm run setup --";
+const WIN = process.platform === "win32";
 
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes(n);
@@ -24,14 +36,22 @@ const opt = (n) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 
+const home = os.homedir();
+const shown = (p) =>
+  p.startsWith(ROOT + path.sep) && !INSTALLED
+    ? "./" + path.relative(ROOT, p).split(path.sep).join("/")
+    : p.startsWith(home + path.sep)
+      ? "~" + p.slice(home.length)
+      : p;
+
 if (flag("--help") || flag("-h")) {
-  console.log(`Usage: npm run setup [-- options]
+  console.log(`Usage: ${USAGE} [options]
 
   --name <name>     your name (default: git config user.name)
-  --vault <path>    your existing vault, or a new folder for a starter vault (default: ./my-vault)
-  --config <file>   where to write the config (default: brain.config.local.json)
+  --vault <path>    your existing vault, or a new folder for a starter vault (default: ${shown(STARTER)})
+  --config <file>   where to write the config (default: ${shown(DEFAULT_CONFIG)})
   --yes             ask nothing, take the defaults
-  --force           replace an existing config`);
+  --force           replace an existing config${INSTALLED ? "\n  --no-models       skip fetching the search models now; the server fetches them on first use" : ""}`);
   process.exit(0);
 }
 
@@ -51,8 +71,7 @@ const fail = (msg) => {
 
 // The name becomes part of a file name and a quoted YAML string, so characters that break either are dropped.
 const clean = (s) => s.replace(/[\\/:*?"<>|\x00-\x1f]/g, "").replace(/\s+/g, " ").trim();
-const fromUser = (p) => path.resolve(process.env.INIT_CWD ?? process.cwd(), p.replace(/^~(?=$|[\\/])/, os.homedir()));
-const shown = (p) => (p.startsWith(ROOT + path.sep) ? "./" + path.relative(ROOT, p).split(path.sep).join("/") : p);
+const fromUser = (p) => path.resolve(process.env.INIT_CWD ?? process.cwd(), p.replace(/^~(?=$|[\\/])/, home));
 const today = new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD in local time
 
 function guessName() {
@@ -68,6 +87,25 @@ function guessName() {
   n = clean(n);
   // "ADA LOVELACE" reads better as "Ada Lovelace"
   return n && n === n.toUpperCase() ? n.toLowerCase().replace(/(^|[\s'-])\p{L}/gu, (c) => c.toUpperCase()) : n;
+}
+
+/** Vaults the Obsidian app knows about, the open or most recently used first. */
+function obsidianVaults() {
+  const file =
+    process.platform === "darwin"
+      ? path.join(home, "Library", "Application Support", "obsidian", "obsidian.json")
+      : WIN
+        ? path.join(process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), "obsidian", "obsidian.json")
+        : path.join(process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "obsidian", "obsidian.json");
+  try {
+    const vaults = Object.values(JSON.parse(fs.readFileSync(file, "utf8")).vaults ?? {});
+    return vaults
+      .filter((v) => typeof v?.path === "string" && fs.existsSync(v.path))
+      .sort((a, b) => Number(!!b.open) - Number(!!a.open) || (b.ts ?? 0) - (a.ts ?? 0))
+      .map((v) => v.path);
+  } catch {
+    return [];
+  }
 }
 
 function markdownFiles(dir) {
@@ -96,9 +134,16 @@ function render(dir, name, only = () => true) {
   return created;
 }
 
-console.log("\nbrain-mcp setup\n\nThis points brain-mcp at your own notes. Your settings go in a config file that git ignores,\nso the example vault and every check keep working.\n");
+const quote = (s) => (/[\s"]/.test(s) ? `"${s}"` : s);
+const hasClaude = () => spawnSync("claude", ["--version"], { stdio: "ignore", shell: WIN }).status === 0;
 
-const configPath = path.resolve(opt("--config") ? fromUser(opt("--config")) : path.join(ROOT, "brain.config.local.json"));
+console.log(
+  INSTALLED
+    ? `\nbrain-mcp setup\n\nThis points brain-mcp at your own notes. Your settings go in ${shown(DEFAULT_CONFIG)}.\n`
+    : "\nbrain-mcp setup\n\nThis points brain-mcp at your own notes. Your settings go in a config file that git ignores,\nso the example vault and every check keep working.\n",
+);
+
+const configPath = path.resolve(opt("--config") ? fromUser(opt("--config")) : DEFAULT_CONFIG);
 if (fs.existsSync(configPath) && !flag("--force")) {
   let owner = "someone";
   try {
@@ -109,10 +154,23 @@ if (fs.existsSync(configPath) && !flag("--force")) {
 }
 
 const name = clean(opt("--name") ?? (await ask("Your name", guessName())));
-if (!name) fail('A name is needed: npm run setup -- --name "Your Name"');
+if (!name) fail(`A name is needed: ${USAGE} --name "Your Name"`);
 
-const answer = opt("--vault") ?? (await ask("Where are your notes? Paste the path to your vault, or press Enter for a new starter vault in ./my-vault"));
-const vaultDir = answer ? fromUser(answer) : path.join(ROOT, "my-vault");
+// Only offered at a terminal: a vault full of real notes is never picked without someone saying so.
+let answer = opt("--vault");
+if (answer === undefined) {
+  const found = rl ? obsidianVaults() : [];
+  if (found.length) {
+    console.log(`\nObsidian vaults on this machine:\n${found.map((v, i) => `  ${i + 1}. ${shown(v)}`).join("\n")}\n`);
+    const pick = await ask(`Which one? A number, a path, or "new" for a starter vault in ${shown(STARTER)}`, "1");
+    if (pick === "new") answer = "";
+    else if (/^\d+$/.test(pick)) answer = found[Number(pick) - 1] ?? fail(`There is no vault number ${pick}.`);
+    else answer = pick;
+  } else {
+    answer = await ask(`Where are your notes? Paste the path to your vault, or press Enter for a new starter vault in ${shown(STARTER)}`);
+  }
+}
+const vaultDir = answer ? fromUser(answer) : STARTER;
 if (fs.existsSync(vaultDir) && !fs.statSync(vaultDir).isDirectory()) fail(`${vaultDir} is a file, not a folder.`);
 
 const existing = fs.existsSync(vaultDir) ? markdownFiles(vaultDir) : [];
@@ -134,6 +192,16 @@ if (existing.length) {
   created = render(vaultDir, name);
   profileFile = created.find((f) => path.basename(f).startsWith("About ")) ?? null;
 }
+
+const isDefault = configPath === DEFAULT_CONFIG;
+// What an MCP client runs. An npm install goes through npx, which needs cmd /c on Windows.
+const server = INSTALLED
+  ? { command: WIN ? "cmd" : "npx", args: [...(WIN ? ["/c", "npx"] : []), "-y", PKG, "--stdio"] }
+  : { command: "node", args: [ENTRY, "--stdio"] };
+if (!isDefault) server.args.push("--config", configPath);
+const addArgs = ["mcp", "add", "--scope", "user", "brain", "--", server.command, ...server.args];
+const addLine = `claude ${addArgs.map((a) => (a === ENTRY || a === configPath ? `"${a}"` : quote(a))).join(" ")}`;
+const connect = rl && hasClaude() && (await confirm("Connect Claude Code now?", true));
 rl?.close();
 
 // The vault path is stored relative to the config when the vault sits beside it, so the folder can move as a whole.
@@ -151,22 +219,44 @@ const config = {
 fs.mkdirSync(path.dirname(configPath), { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
 
-const isDefault = configPath === path.join(ROOT, "brain.config.local.json");
+// Index the vault and fetch the models now, so the first question from a client is not stuck behind a download.
+if (INSTALLED && !flag("--no-models") && process.env.BRAIN_MCP_HYBRID !== "0") {
+  console.log("\nIndexing your notes and fetching the search models (about 300 MB, only the first time)...\n");
+  const warm = () => spawnSync(process.execPath, [ENTRY, "--reindex", "--warm", "--config", configPath], { stdio: ["ignore", "inherit", "inherit"] }).status === 0;
+  // One retry: a dropped connection is the usual failure, and files that finished downloading are kept.
+  let ok = warm();
+  if (!ok) {
+    console.log("\nRetrying once...\n");
+    ok = warm();
+  }
+  if (!ok)
+    console.log(`\nThe models could not be fetched now. Search works by keyword until the server fetches them on first use,\nor run this again: npx ${PKG} --reindex --warm`);
+}
+
+let connected = false;
+if (connect) {
+  const r = WIN ? spawnSync(addLine, { encoding: "utf8", shell: true }) : spawnSync("claude", addArgs, { encoding: "utf8" });
+  connected = r.status === 0;
+  if (!connected) console.log(`\nclaude mcp add did not work: ${(r.stderr || r.stdout || "").trim()}`);
+}
+
 const lines = [
   `Done. brain-mcp now serves ${name}'s notes from ${shown(vaultDir)}`,
   "",
-  `  Config    ${shown(configPath)}${isDefault ? " (delete it to go back to the example vault)" : ""}`,
+  `  Config    ${shown(configPath)}${isDefault && !INSTALLED ? " (delete it to go back to the example vault)" : ""}`,
   profileFile
     ? `  Profile   ${shown(profileFile)}: fill it in first, every client reads it`
     : `  Profile   none yet: add a note titled "${profileNote}" and it becomes your profile`,
 ];
 if (created.length) lines.push(`  Created   ${created.map((f) => path.relative(vaultDir, f)).join(", ")}`);
 if (!fs.existsSync(ENTRY)) lines.push("", "Build the server first:", "", "  npm run build");
+if (connected) lines.push("", "Claude Code is connected (server name: brain).");
+else lines.push("", "Connect Claude Code:", "", `  ${addLine}`);
 lines.push(
   "",
-  "Connect Claude Code:",
+  "Claude Desktop, Cursor and other MCP clients: add this to their mcpServers config:",
   "",
-  `  claude mcp add --scope user brain -- node "${ENTRY}" --stdio${isDefault ? "" : ` --config "${configPath}"`}`,
+  `  "brain": ${JSON.stringify(server)}`,
   "",
   'Then ask it: "what do you know about me?"',
   "Already connected? Restart your client so it loads the new vault.",

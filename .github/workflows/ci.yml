@@ -57,3 +57,25 @@ jobs:
         run: node scripts/eval-hybrid.mjs
       - name: Vault is restored
         run: git diff --exit-code -- example-vault
+
+  package:
+    name: npm package on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # better-sqlite3 ships prebuilt binaries, but the lockfile flags an install script, so npm ci would compile it
+      # from source and fail on a Windows runner without a C++ toolchain. Nothing here needs install scripts. A user's
+      # install of the package does not compile it, and verify-package.mjs installs the tarball with scripts on.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # What `npx debawho-brain-mcp init` gives a new user: pack, install, init, serve, and no state in the package folder.
+      - name: Pack, install and run as a new user
+        run: node scripts/verify-package.mjs
