@@ -37,7 +37,7 @@ Every new chat starts from zero. You explain who you are, what you are building 
 brain-mcp keeps that context in the Markdown notes you already own. Connect any MCP client and it learns who you are, how you work, what your projects are and what you touched this week. It can search, follow links and write back to the vault as you talk.
 
 - **Your files, your machine.** Notes stay plain Markdown in a folder you control. Nothing is uploaded to a third party.
-- **One memory, every client.** Claude Code, Claude Desktop, claude.ai, your phone and anything else that speaks MCP read the same vault.
+- **One memory, every client.** Claude Code, Claude Desktop, claude.ai, Cursor, Hermes Agent, your phone and anything else that speaks MCP read the same vault.
 - **Hybrid retrieval, fully local.** Keyword search plus meaning search with a small embedding model, then a reranker, all on your CPU. It can also answer "the vault does not record this" instead of guessing.
 - **Measured.** Every ranking change is scored by two bundled evals, keyword and hybrid side by side.
 - **Private by default.** OAuth 2.1 with PKCE for remote access, read, write and private scopes, secret redaction and an audit log of every call.
@@ -146,7 +146,13 @@ To connect a client yourself, Claude Code:
 claude mcp add --scope user brain -- npx -y debawho-brain-mcp --stdio
 ```
 
-Claude Desktop, Cursor, VS Code and other MCP clients:
+[Hermes Agent](https://github.com/NousResearch/hermes-agent):
+
+```bash
+hermes mcp add brain --command npx --args -y debawho-brain-mcp --stdio
+```
+
+Claude Desktop, Cursor and other clients that read an `mcpServers` config:
 
 ```json
 {
@@ -343,6 +349,15 @@ Or commit a `.mcp.json` to a project so it is available whenever that folder is 
 ### Claude Desktop
 
 Add the same `mcpServers` block to `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`) and restart the app.
+
+### Hermes Agent
+
+```bash
+hermes mcp add brain --command npx --args -y debawho-brain-mcp --stdio
+hermes mcp test brain    # connects and lists the 13 tools
+```
+
+The tools appear in Hermes as `mcp_brain_brain_identity`, `mcp_brain_brain_context` and so on. For the remote server, use `hermes mcp add brain --url https://brain.example.com/mcp --auth oauth` and sign in once.
 
 <details>
 <summary><b>HTTP on your own network</b></summary>
