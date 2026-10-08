@@ -359,6 +359,10 @@ hermes mcp test brain    # connects and lists the 13 tools
 
 The tools appear in Hermes as `mcp_brain_brain_identity`, `mcp_brain_brain_context` and so on. For the remote server, use `hermes mcp add brain --url https://brain.example.com/mcp --auth oauth` and sign in once.
 
+### Agent skill
+
+[`skills/brain-mcp`](skills/brain-mcp) is a SKILL.md that teaches an agent to use the server well: load the owner's identity only for their own work, pick the right tool for each question, cite note ids, say when the vault doesn't record something, and write back only with the owner's consent. Copy the folder into your agent's skills directory, for example `~/.claude/skills/brain-mcp/` for Claude Code. It is instructions only, with no scripts.
+
 <details>
 <summary><b>HTTP on your own network</b></summary>
 
