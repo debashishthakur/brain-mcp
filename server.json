@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.debashishthakur/brain-mcp",
+  "title": "brain-mcp",
+  "description": "Your Obsidian vault as private, searchable memory for Claude, Cursor, Hermes and any MCP client",
+  "websiteUrl": "https://2brain.debawho.xyz",
+  "repository": {
+    "url": "https://github.com/debashishthakur/brain-mcp",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "debawho-brain-mcp",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--stdio"
+        }
+      ]
+    }
+  ]
+}
