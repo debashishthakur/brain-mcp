@@ -9,6 +9,7 @@
 An open-source [Model Context Protocol](https://modelcontextprotocol.io) server that serves your notes, from your own machine, to Claude and any MCP client.
 
 [![CI](https://github.com/debashishthakur/brain-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/debashishthakur/brain-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/debawho-brain-mcp?logo=npm&color=CB3837)](https://www.npmjs.com/package/debawho-brain-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Good first issues](https://img.shields.io/github/issues/debashishthakur/brain-mcp/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/debashishthakur/brain-mcp/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
@@ -131,7 +132,35 @@ The index lives in `data/index.db`, embeddings included. It is rebuilt on every 
 
 ## Quick start
 
-Requires **Node 22 or newer**.
+Requires **Node 22 or newer**. One command sets it up on your notes:
+
+```bash
+npx debawho-brain-mcp init
+```
+
+It lists the Obsidian vaults on your machine and asks which one to serve (or makes a starter vault in `~/second-brain`), asks your name, fetches the two search models once (about 300 MB), and offers to connect Claude Code for you. Your notes stay where they are; the config, index and logs go in `~/.brain-mcp/`. Then ask Claude "what do you know about me?"
+
+To connect a client yourself, Claude Code:
+
+```bash
+claude mcp add --scope user brain -- npx -y debawho-brain-mcp --stdio
+```
+
+Claude Desktop, Cursor, VS Code and other MCP clients:
+
+```json
+{
+  "mcpServers": {
+    "brain": { "command": "npx", "args": ["-y", "debawho-brain-mcp", "--stdio"] }
+  }
+}
+```
+
+On Windows, put `cmd /c` in front of `npx`: `"command": "cmd", "args": ["/c", "npx", "-y", "debawho-brain-mcp", "--stdio"]`. Run `npx debawho-brain-mcp --help` for the HTTP and OAuth modes.
+
+### From source
+
+For development, the checks and evals, or Docker:
 
 ```bash
 git clone https://github.com/debashishthakur/brain-mcp.git
@@ -145,13 +174,13 @@ The repository ships with `example-vault/`, a small fictional vault belonging to
 
 The first hybrid query downloads the two models (about 300 MB) from Hugging Face into `data/models`. After that, everything runs offline.
 
-### Make it yours
+### Make it yours (from source)
 
 ```bash
 npm run setup
 ```
 
-Setup asks for your name (it suggests the one from `git config`) and where your notes are. Point it at an existing Obsidian vault, or press Enter for a starter vault in `my-vault/` with a profile note to fill in. It writes `brain.config.local.json`, which git ignores and the server uses from then on, with its own index so your notes never mix with the example. It ends by printing the `claude mcp add` command for your machine: run it, then ask Claude "what do you know about me?"
+The same setup as `init`, for a clone. It asks for your name (it suggests the one from `git config`) and where your notes are. Point it at an existing Obsidian vault, or press Enter for a starter vault in `my-vault/` with a profile note to fill in. It writes `brain.config.local.json`, which git ignores and the server uses from then on, with its own index so your notes never mix with the example. It ends by printing the `claude mcp add` command for your machine: run it, then ask Claude "what do you know about me?"
 
 Delete `brain.config.local.json` to go back to the example vault. The checks and evals always run against the example vault, so they keep passing after setup.
 
@@ -166,6 +195,7 @@ node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway v
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
+node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
 node scripts/eval-hybrid.mjs     # 15 harder questions: paraphrase, typo, identifier, date, multi-hop, alias, off-topic
 node scripts/debug-rank.mjs "your question"   # trace one query through every ranking step
@@ -212,7 +242,7 @@ Hybrid search puts the right note first far more often and refuses questions the
 
 ## Use your own vault
 
-`npm run setup` does this for you. To do it by hand, copy `brain.config.json` to `brain.config.local.json` and change what differs:
+`npx debawho-brain-mcp init`, or `npm run setup` in a clone, does this for you. To do it by hand, copy `brain.config.json` to `brain.config.local.json` (or `~/.brain-mcp/config.json` for the npm package) and change what differs:
 
 ```json
 {
@@ -228,7 +258,7 @@ Hybrid search puts the right note first far more often and refuses questions the
 }
 ```
 
-`vaultPath` and `dataDir` are resolved relative to the config file. The server uses the first config it finds: `--config <path>`, then `BRAIN_MCP_CONFIG`, then `brain.config.local.json`, then `brain.config.json`. Run `npm run reindex` to check the note count; the first log line names the config in use.
+`vaultPath` and `dataDir` are resolved relative to the config file. The server uses the first config it finds: `--config <path>`, then `BRAIN_MCP_CONFIG`, then `brain.config.local.json`, then `~/.brain-mcp/config.json` (npm package only), then `brain.config.json`. Run `npm run reindex` to check the note count; the first log line names the config in use.
 
 <details>
 <summary><b>What the server reads from a note</b></summary>
@@ -269,7 +299,7 @@ Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become 
 | Key | Meaning |
 | --- | --- |
 | `vaultPath` | Vault folder, relative to the config file. |
-| `dataDir` | Folder for the search index and the OAuth database, relative to the config file. Default: `data/`. Setup sets `./data/local`, so your index never mixes with the example vault's. The models stay in `data/models` either way. |
+| `dataDir` | Folder for the search index and the OAuth database, relative to the config file. Default: `data/` in a clone, `~/.brain-mcp/data/` for the npm package. Setup sets `./data/local`, so your index never mixes with the example vault's. The models stay in `data/models` either way. |
 | `owner` | Name used in the server instructions and the identity bundle. |
 | `captureDir` | The only folder the server writes to. |
 | `memoryFile` | File `brain_remember` appends to. Must be inside `captureDir`. |
@@ -283,7 +313,7 @@ Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become 
 | `http.*` | Host, port and path for HTTP modes. The shipped config uses `127.0.0.1:3737/mcp`. |
 | `auth.*` | Mode, public URL, token lifetimes, lockout policy and default scopes for OAuth. |
 
-Environment overrides: `BRAIN_MCP_CONFIG`, `BRAIN_MCP_DATA_DIR`, `BRAIN_MCP_LOG_DIR`, `BRAIN_MCP_HOST`, `BRAIN_MCP_PORT`, `BRAIN_MCP_AUTH_MODE` (`token` or `oauth`), `BRAIN_MCP_PUBLIC_URL`, and `BRAIN_MCP_HYBRID=0` to switch back to keyword-only ranking.
+Environment overrides: `BRAIN_MCP_HOME` (where the npm package keeps its config, index and logs; default `~/.brain-mcp`), `BRAIN_MCP_CONFIG`, `BRAIN_MCP_DATA_DIR`, `BRAIN_MCP_LOG_DIR`, `BRAIN_MCP_HOST`, `BRAIN_MCP_PORT`, `BRAIN_MCP_AUTH_MODE` (`token` or `oauth`), `BRAIN_MCP_PUBLIC_URL`, and `BRAIN_MCP_HYBRID=0` to switch back to keyword-only ranking.
 
 </details>
 
@@ -292,8 +322,10 @@ Environment overrides: `BRAIN_MCP_CONFIG`, `BRAIN_MCP_DATA_DIR`, `BRAIN_MCP_LOG_
 ### Claude Code
 
 ```bash
-claude mcp add --scope user brain -- node /absolute/path/to/brain-mcp/dist/index.js --stdio
+claude mcp add --scope user brain -- npx -y debawho-brain-mcp --stdio
 ```
+
+From a clone, run the build instead: `claude mcp add --scope user brain -- node /absolute/path/to/brain-mcp/dist/index.js --stdio`.
 
 Or commit a `.mcp.json` to a project so it is available whenever that folder is open:
 
@@ -446,7 +478,7 @@ If you use brain-mcp in research or teaching, please cite it. GitHub's **Cite th
 ```text
 brain-mcp/
 ├── src/
-│   ├── index.ts          entry point: stdio, --http, --oauth, --reindex
+│   ├── index.ts          entry point: init, stdio, --http, --oauth, --reindex
 │   ├── tools.ts          the 13 MCP tools, resources and prompts
 │   ├── context.ts        brain_context: fusion and packing under a budget
 │   ├── identity.ts       the persona bundle
@@ -456,7 +488,7 @@ brain-mcp/
 │   │   └── dense.ts      local embeddings and the reranker
 │   └── auth/             OAuth 2.1 server, login page, TOTP, token store
 ├── scripts/              setup, smoke test, verification scripts, retrieval eval
-├── templates/            the starter vault npm run setup creates
+├── templates/            the starter vault init and npm run setup create
 ├── example-vault/        a fictional vault used by every script
 ├── deploy/               Linux and Windows setup, Cloudflare Tunnel template
 └── brain.config.json     the example vault's config; npm run setup writes yours beside it
