@@ -74,7 +74,7 @@ flowchart LR
    - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
-   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`). When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
+   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`), always including each list's first pick, so fusion cannot bury a hit only one search found. When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
    - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
 4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
