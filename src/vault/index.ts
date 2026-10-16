@@ -630,7 +630,11 @@ export class VaultIndex {
     }
 
     const cands = fused.slice(0, rc.rerankN);
-    const agree = rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key;
+    // The shortcut needs the agreed section inside the reranked head. The note-level list can lift other notes'
+    // first windows above it (a long note such as the memory file competes there through its first window only),
+    // and a head without it would gate a well-answered query to "none".
+    const agree =
+      rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key && cands.slice(0, 3).some((c) => c.key === lex[0].key);
     const passage = (c: { item: { note_id: string; ord: number } }) => {
       const note = noteOf(c.item.note_id);
       const sec = secStmt.get(c.item.note_id, c.item.ord) as { heading: string; text: string } | undefined;

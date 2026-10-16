@@ -74,7 +74,7 @@ flowchart LR
    - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
-   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`). When keyword and meaning search agree on the top hit, only the top 3 are reranked.
+   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`). When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
    - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
 4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
@@ -238,7 +238,7 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Ranker | Right note first | Right note in top 5 | Expected note in the context pack | Time per question (laptop CPU) |
 | --- | --- | --- | --- | --- |
 | Keyword only | 42% | 100% | 100% | 2 ms |
-| Hybrid (default) | **67%** | 75% | 75% | about 0.6 s |
+| Hybrid (default) | **83%** | 100% | 100% | about 1.1 s |
 
 **`eval-hybrid.mjs`**, 15 harder questions:
 
@@ -247,7 +247,7 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Keyword only | 67% | 100% | 2 of 3 |
 | Hybrid (default) | 67% | 75% | **3 of 3** |
 
-Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is the "nothing relevant" floor: on these short example notes it also refuses some real questions, such as "the raspberry pi overheating in the sun". Calibrating that floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
+Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is paraphrase: on the harder set it still misses some real questions asked in other words, such as "why is the bird audio never sent to an online service". Calibrating the "nothing relevant" floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
 
 ## Use your own vault
 
