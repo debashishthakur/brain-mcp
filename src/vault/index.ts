@@ -630,6 +630,13 @@ export class VaultIndex {
     }
 
     const cands = fused.slice(0, rc.rerankN);
+    // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
+    // the long memory file, can fall far below other notes' first windows that collect votes from several lists.
+    for (const best of [lex[0], den[0], exact[0], noteList[0]]) {
+      if (!best || cands.some((c) => c.key === best.key)) continue;
+      const f = fused.find((x) => x.key === best.key);
+      if (f) cands.push(f);
+    }
     // The shortcut needs the agreed section inside the reranked head. The note-level list can lift other notes'
     // first windows above it (a long note such as the memory file competes there through its first window only),
     // and a head without it would gate a well-answered query to "none".
