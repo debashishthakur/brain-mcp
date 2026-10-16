@@ -48,6 +48,8 @@ show("missing", await client.callTool({ name: "brain_read", arguments: { note: "
 show("remember", await client.callTool({ name: "brain_remember", arguments: { fact: "Smoke-test fact: the smoke test exercised brain_remember against the example vault.", category: "project", why: "Proves the write path works end to end.", how_to_apply: "Ignore; the smoke test removes this block when it finishes." } }));
 show("capture", await client.callTool({ name: "brain_capture", arguments: { title: "Smoke test capture", body: "This note was written by the smoke test. It links [[Raspberry Pi]] and belongs to [[Kestrel]].", kind: "log", project: "Kestrel", topics: ["Raspberry Pi"] } }));
 show("read captured memory", await client.callTool({ name: "brain_read", arguments: { note: "Captures/Memory.md" } }), 800);
+show("facts now", await client.callTool({ name: "brain_facts", arguments: {} }), 800);
+show("facts history", await client.callTool({ name: "brain_facts", arguments: { history: true, query: "smoke test" } }), 600);
 show("search captured", await client.callTool({ name: "brain_search", arguments: { query: "smoke test", limit: 5 } }));
 
 const r = await client.readResource({ uri: "brain://note/Hubs/Kestrel.md" });

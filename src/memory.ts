@@ -2,15 +2,20 @@ import { queryTerms } from "./vault/index.js";
 
 /** One entry in Captures/Memory.md, delimited by "## <stamp> · <category>". */
 export interface MemoryBlock {
-  id: string; // the stamp, e.g. "2026-09-22 18:21"
+  id: string; // the stamp, e.g. "2026-09-22 18:21"; a stamp seen before in the file gets " #2", " #3", ...
+  stamp: string; // the stamp exactly as written in the heading
+  ord: number; // position in the file, 0 = first block
   category: string;
-  text: string;
+  text: string; // everything under the heading
 }
 
 const BLOCK_RE = /^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · (\w+)\s*$/;
+/** A fact id as written in a heading or a Replaces line. */
+export const FACT_ID_RE = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: #\d+)?/g;
 
 export function parseMemoryBlocks(markdown: string): MemoryBlock[] {
   const blocks: MemoryBlock[] = [];
+  const seen = new Map<string, number>();
   let cur: MemoryBlock | null = null;
   const buf: string[] = [];
   const flush = () => {
@@ -24,7 +29,9 @@ export function parseMemoryBlocks(markdown: string): MemoryBlock[] {
     const m = line.match(BLOCK_RE);
     if (m) {
       flush();
-      cur = { id: m[1], category: m[2], text: "" };
+      const n = (seen.get(m[1]) ?? 0) + 1;
+      seen.set(m[1], n);
+      cur = { id: n > 1 ? `${m[1]} #${n}` : m[1], stamp: m[1], ord: blocks.length, category: m[2], text: "" };
     } else if (cur) {
       buf.push(line);
     }
@@ -33,12 +40,77 @@ export function parseMemoryBlocks(markdown: string): MemoryBlock[] {
   return blocks;
 }
 
-/** Strip the trailer we add ourselves so it does not count toward similarity. */
+/** Labelled lines brain_remember writes under a fact. Supersedes is the pre-0.5 spelling of Replaces. */
+const LABELS = ["Why", "How to apply", "Key", "Valid from", "Valid until", "Replaces", "Supersedes"] as const;
+const LABEL_RE = new RegExp(`^\\*\\*(${LABELS.join("|")}):\\*\\*\\s*(.*)$`);
+
+export interface BlockFields {
+  fact: string; // the statement itself, without the labelled lines or the via trailer
+  why: string | null;
+  how: string | null;
+  subject: string | null;
+  attribute: string | null;
+  validFrom: string | null; // raw text after "Valid from:"
+  validUntil: string | null;
+  replaces: string[]; // fact ids named on Replaces / Supersedes lines
+  via: string | null;
+}
+
+/** Split a block's text into the fact and its labelled lines. A label's value runs until the next blank line. */
+export function blockFields(text: string): BlockFields {
+  const out: BlockFields = { fact: "", why: null, how: null, subject: null, attribute: null, validFrom: null, validUntil: null, replaces: [], via: null };
+  const factLines: string[] = [];
+  let label: string | null = null;
+  let value: string[] = [];
+  const close = () => {
+    if (!label) return;
+    const v = value.join("\n").trim();
+    if (label === "Why") out.why = v || null;
+    else if (label === "How to apply") out.how = v || null;
+    else if (label === "Valid from") out.validFrom = v || null;
+    else if (label === "Valid until") out.validUntil = v || null;
+    else if (label === "Replaces" || label === "Supersedes") out.replaces.push(...(v.match(FACT_ID_RE) ?? []));
+    else if (label === "Key") {
+      const at = v.lastIndexOf(" / ");
+      if (at > 0) {
+        out.subject = v.slice(0, at).trim() || null;
+        out.attribute = v.slice(at + 3).trim() || null;
+      }
+    }
+    label = null;
+    value = [];
+  };
+  let pastFact = false;
+  for (const line of text.split(/\r?\n/)) {
+    const via = line.trim().match(/^\*via (mcp:[^*]*)\*$/);
+    if (via) {
+      close();
+      out.via = via[1].trim();
+      pastFact = true;
+      continue;
+    }
+    const m = line.match(LABEL_RE);
+    if (m) {
+      close();
+      label = m[1];
+      value = [m[2]];
+      pastFact = true;
+    } else if (label) {
+      if (line.trim()) value.push(line);
+      else close();
+    } else if (!pastFact) {
+      factLines.push(line);
+    }
+  }
+  close();
+  out.fact = factLines.join("\n").trim();
+  out.replaces = [...new Set(out.replaces)];
+  return out;
+}
+
+/** Strip the labelled lines and trailer we add ourselves so they do not count toward similarity. */
 function factOnly(text: string): string {
-  return text
-    .replace(/\*via mcp:[^*]*\*/g, "")
-    .replace(/\*\*(Why|How to apply|Supersedes):\*\*.*$/gms, "")
-    .trim();
+  return blockFields(text).fact;
 }
 
 export interface Similarity {

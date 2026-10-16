@@ -4,6 +4,15 @@ import type { Policy, Principal } from "./policy.js";
 
 const STRUCTURAL = new Set(["hub", "concept", "moc", "meta", "guide"]);
 
+/** A memory-file section whose fact is not true now gets a warning under its heading; the fact stays readable as history. */
+function flagFact(index: VaultIndex, noteId: string, ord: number, text: string): string {
+  const id = index.factIdOfSection(noteId, ord);
+  const flag = id ? index.facts.flag(id) : null;
+  if (!flag) return text;
+  const nl = text.indexOf("\n");
+  return /^#{1,6}\s/.test(text) && nl > 0 ? `${text.slice(0, nl)}\n${flag}${text.slice(nl)}` : `${flag}\n${text}`;
+}
+
 export interface ContextOptions {
   project?: string;
   budgetChars?: number;
@@ -155,7 +164,7 @@ export function buildContext(cfg: ResolvedConfig, index: VaultIndex, policy: Pol
     parts.push(`---\n## [${i + 1}] ${n.title}\n\`${id}\`\n`);
     for (const cand of cands) {
       const sec = index.section(id, cand.ord)!;
-      let text = sec.text;
+      let text = flagFact(index, id, cand.ord, sec.text);
       if (text.length > c.maxSectionChars) text = text.slice(0, c.maxSectionChars).trimEnd() + `\n[… section truncated; brain_read note="${id}" section="${sec.heading}" for the rest]`;
       parts.push(policy.redact(text).text + "\n");
     }
@@ -235,7 +244,7 @@ export async function buildContextHybrid(cfg: ResolvedConfig, index: VaultIndex,
     const n = g[0].note;
     parts.push(`---\n## [${i + 1}] ${n.title}\n\`${id}\`\n`);
     for (const s of g) {
-      let text = s.text;
+      let text = flagFact(index, id, s.ord, s.text);
       if (text.length > c.maxSectionChars) text = text.slice(0, c.maxSectionChars).trimEnd() + `\n[… section truncated; brain_read note="${id}" section="${s.heading}" for the rest]`;
       parts.push(policy.redact(text).text + "\n");
     }

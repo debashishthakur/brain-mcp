@@ -43,6 +43,8 @@ jobs:
         run: node scripts/smoke.mjs
       - name: Redaction, watcher, HTTP auth, audit
         run: node scripts/verify.mjs
+      - name: Fact windows (dates, replacements, expiry)
+        run: node scripts/verify-facts.mjs
       - name: Memory and identity
         run: node scripts/verify-memory.mjs
       - name: Write, edit, move and delete tools

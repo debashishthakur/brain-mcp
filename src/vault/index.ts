@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
 import { parseNoteFile, splitSections, stripConnections, toId, type ParsedNote } from "./parse.js";
 import { DenseIndex } from "./dense.js";
+import { FactStore } from "../facts.js";
 import type { ResolvedConfig } from "../config.js";
 
 export interface NoteRow {
@@ -205,6 +206,9 @@ export class VaultIndex {
   readonly db: Database.Database;
   /** Embeddings + reranker; null when `retrieval.hybrid` is off. Models load lazily on first use. */
   readonly dense: DenseIndex | null;
+  /** Facts from the memory file with their validity windows, rebuilt whenever that file is indexed. */
+  readonly facts: FactStore;
+  private readonly memoryId: string;
   private watcher: FSWatcher | null = null;
   private pending = new Map<string, NodeJS.Timeout>();
   private listeners = new Set<(event: "upsert" | "remove", id: string) => void>();
@@ -214,6 +218,18 @@ export class VaultIndex {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
     this.dense = cfg.retrieval.hybrid ? new DenseIndex(this.db, cfg.modelsDir, cfg.retrieval) : null;
+    this.memoryId = cfg.memoryFile.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+    this.facts = new FactStore(this.db);
+    // An index built before the facts table existed already holds the memory file: derive the table from it now.
+    this.facts.rebuild(this.memoryNote()?.body ?? null);
+  }
+
+  private isMemoryFile(id: string): boolean {
+    return id.toLowerCase() === this.memoryId;
+  }
+
+  private memoryNote(): NoteRow | undefined {
+    return this.db.prepare("SELECT * FROM notes WHERE LOWER(id) = ?").get(this.memoryId) as NoteRow | undefined;
   }
 
   onChange(fn: (event: "upsert" | "remove", id: string) => void): () => void {
@@ -338,6 +354,7 @@ export class VaultIndex {
     }
     // Keep vectors for ordinals that still exist (their hash decides whether they are re-embedded); drop the rest.
     this.dense?.forget(n.id, count);
+    if (this.isMemoryFile(n.id)) this.facts.rebuild(n.body);
   }
 
   removeId(id: string): void {
@@ -352,6 +369,7 @@ export class VaultIndex {
       this.db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(id);
       this.dense?.forget(id);
+      if (this.isMemoryFile(id)) this.facts.rebuild(null);
     })();
     for (const fn of this.listeners) fn("remove", id);
   }
@@ -630,7 +648,18 @@ export class VaultIndex {
     }
 
     const cands = fused.slice(0, rc.rerankN);
-    const agree = rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key;
+    // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
+    // the long memory file, can fall far below other notes' first windows that collect votes from several lists.
+    for (const best of [lex[0], den[0], exact[0], noteList[0]]) {
+      if (!best || cands.some((c) => c.key === best.key)) continue;
+      const f = fused.find((x) => x.key === best.key);
+      if (f) cands.push(f);
+    }
+    // The shortcut needs the agreed section inside the reranked head. The note-level list can lift other notes'
+    // first windows above it (a long note such as the memory file competes there through its first window only),
+    // and a head without it would gate a well-answered query to "none".
+    const agree =
+      rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key && cands.slice(0, 3).some((c) => c.key === lex[0].key);
     const passage = (c: { item: { note_id: string; ord: number } }) => {
       const note = noteOf(c.item.note_id);
       const sec = secStmt.get(c.item.note_id, c.item.ord) as { heading: string; text: string } | undefined;
@@ -684,6 +713,28 @@ export class VaultIndex {
 
   section(noteId: string, ord: number): SectionRow | undefined {
     return this.db.prepare("SELECT * FROM sections WHERE note_id = ? AND ord = ?").get(noteId, ord) as SectionRow | undefined;
+  }
+
+  /**
+   * The id of the fact a memory-file section belongs to, or null. Found by position, numbering a repeated stamp
+   * " #2", " #3" the way parseMemoryBlocks does, since two facts saved in one minute share a heading. A fact's first
+   * window starts with its "## " heading line; later windows of a long fact carry the heading but not the line.
+   */
+  factIdOfSection(noteId: string, ord: number): string | null {
+    if (!this.isMemoryFile(noteId)) return null;
+    const seen = new Map<string, number>();
+    let current: string | null = null;
+    for (const s of this.sectionsOf(noteId)) {
+      const stamp = s.level === 2 ? s.heading.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · \w+$/)?.[1] : undefined;
+      if (!stamp) current = null;
+      else if (s.text.startsWith("## ")) {
+        const n = (seen.get(stamp) ?? 0) + 1;
+        seen.set(stamp, n);
+        current = n > 1 ? `${stamp} #${n}` : stamp;
+      }
+      if (s.ord === ord) return current;
+    }
+    return null;
   }
 
   sectionsOf(noteId: string): SectionRow[] {

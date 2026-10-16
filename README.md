@@ -55,7 +55,7 @@ flowchart LR
         DB[("SQLite<br/>FTS5 word index<br/>section embeddings<br/>link graph")]
         M["Local models on CPU<br/>bge-small embedder<br/>bge-reranker"]
         R["Hybrid retrieval"]
-        T["13 MCP tools"]
+        T["14 MCP tools"]
         G["Scopes, redaction,<br/>audit log"]
         I --> DB --> R --> T --> G
         M -.-> DB
@@ -74,10 +74,10 @@ flowchart LR
    - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
-   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`). When keyword and meaning search agree on the top hit, only the top 3 are reranked.
+   - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`), always including each list's first pick, so fusion cannot bury a hit only one search found. When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
    - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
-4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
+4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. A fact can replace an earlier one, expire, or start at a given date; `brain_identity` serves only the facts true now, and `brain_facts` keeps the history. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
 
 The retrieval step from question to answer:
 
@@ -110,7 +110,7 @@ Everything runs on your machine: the models are downloaded once into `data/model
 
 | Tool | What it returns |
 | --- | --- |
-| `brain_identity` | Persona bundle: profile note, memory notes, facts captured with `brain_remember`, skills, project list and recent focus. The server instructions ask clients to call this first. Pass `topic` for a smaller bundle. |
+| `brain_identity` | Persona bundle: profile note, memory notes, the captured facts that are true now, skills, project list and recent focus. The server instructions ask clients to call this first. Pass `topic` for a smaller bundle. |
 | `brain_context` | The sections most relevant to a question, with source note ids and a coverage label, from the hybrid ranker, packed under a size budget. Says so explicitly when the vault does not record the answer. |
 | `brain_search` | Hybrid search (keywords, meaning, reranker, spelling correction) with project, type, topic and date filters. Returns ranked notes with snippets. |
 | `brain_read` | One note, or one section of it, with metadata, topics and resolved links. |
@@ -118,7 +118,8 @@ Everything runs on your machine: the models are downloaded once into `data/model
 | `brain_graph` | Links out, backlinks grouped by project, and notes that share topics. |
 | `brain_recent` | Notes modified in the last N days, newest first. |
 | `brain_capture` | Writes a new note with graph-ready frontmatter into the capture folder. |
-| `brain_remember` | Appends a fact to the memory file; it joins `brain_identity` straight away. Near duplicates are refused (token Jaccard ≥ 0.6 or containment ≥ 0.85), partial overlaps get a `Supersedes` line, and `force=true` overrides. |
+| `brain_remember` | Appends a fact to the memory file; it joins `brain_identity` straight away. `replaces` names facts it makes outdated, `subject` + `attribute` replace the previous fact with the same pair on their own, and `valid_from` / `valid_until` bound when it holds. Near duplicates of current facts are refused (token Jaccard ≥ 0.6 or containment ≥ 0.85); a partial overlap in the same category is held back until the caller passes `replaces` or `force=true`. |
+| `brain_facts` | Captured facts and when each was true: the current ones, the ones true at an `as_of` date, or every version with what replaced it (`history`). Filters by `subject`, `category` and words. |
 | `brain_write` | Creates a note at a chosen path in a writable folder (`Notes/` and the capture folder by default), or replaces one with `overwrite=true`. A `hub` note groups every note whose `project` matches its title. |
 | `brain_edit` | Changes part of a note in one of three ways: replace text that matches once, replace a section under a heading, or append. Keeps the file's line endings and bumps `modified`. |
 | `brain_move` | Moves or renames a note within the writable folders. Never overwrites, and names any notes whose links stop resolving. |
@@ -198,7 +199,8 @@ Delete `brain.config.local.json` to go back to the example vault. The checks and
 ```bash
 npm run typecheck
 node scripts/verify.mjs          # redaction, file watcher, HTTP bearer auth, audit log
-node scripts/verify-memory.mjs   # brain_remember dedupe, topic identity, brain_context
+node scripts/verify-facts.mjs    # fact windows: dates, replacements, expiry, bad references
+node scripts/verify-memory.mjs   # brain_remember dedupe and replacements, brain_facts, identity, brain_context
 node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
@@ -238,7 +240,7 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Ranker | Right note first | Right note in top 5 | Expected note in the context pack | Time per question (laptop CPU) |
 | --- | --- | --- | --- | --- |
 | Keyword only | 42% | 100% | 100% | 2 ms |
-| Hybrid (default) | **67%** | 75% | 75% | about 0.6 s |
+| Hybrid (default) | **83%** | 100% | 100% | about 1.1 s |
 
 **`eval-hybrid.mjs`**, 15 harder questions:
 
@@ -247,7 +249,7 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Keyword only | 67% | 100% | 2 of 3 |
 | Hybrid (default) | 67% | 75% | **3 of 3** |
 
-Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is the "nothing relevant" floor: on these short example notes it also refuses some real questions, such as "the raspberry pi overheating in the sun". Calibrating that floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
+Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is paraphrase: on the harder set it still misses some real questions asked in other words, such as "why is the bird audio never sent to an online service". Calibrating the "nothing relevant" floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
 
 ## Use your own vault
 
@@ -295,10 +297,44 @@ Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become 
 
 - **Profile:** the note named by `identity.profileNote`, matched by title, alias, path or file name.
 - **Memory:** every note whose `project` is `identity.memoryProject`. Write each one with a **How to apply** line; the bundle tells the client to follow them.
-- **Captured facts:** the file at `memoryFile`, which `brain_remember` appends to.
+- **Captured facts:** the facts in `memoryFile` that are true now. Replaced, expired and not-yet-valid ones stay in the file and are left out. Over the size cap, who the owner is and how to work with them stay longest, then the newest project and reference facts.
 - **Skills:** notes in `identity.skillsProject`, listed by their first paragraph.
 - **Projects:** every note with `type: hub`.
 - **Current focus:** content notes modified in the last `identity.focusWindowDays` days.
+
+</details>
+
+<details>
+<summary><b>Facts that change over time</b></summary>
+
+The memory file stays plain Markdown and stays append-only: once written, a fact is never edited by the server. A later fact says what it changes, on lines you can read in Obsidian:
+
+```markdown
+## 2026-09-22 18:21 · project
+
+The app uses SQLite.
+
+*via mcp:claude-code*
+
+## 2026-10-16 09:10 · project
+
+The app uses Postgres.
+
+**Key:** the app / database
+
+**Valid from:** 2026-10-01
+
+**Replaces:** 2026-09-22 18:21
+
+*via mcp:claude-code*
+```
+
+- **Ids** are the stamps in the headings. Two facts saved in the same minute become `2026-10-16 09:10` and `2026-10-16 09:10 #2`.
+- **Replaces** ends the named facts when the new one starts (its `Valid from`, or when it was recorded). Only earlier facts can be replaced. A `Supersedes` line from older versions counts the same way.
+- **Key** (`subject / attribute`) makes replacement automatic: a later fact with the same pair, in any letter case, replaces the current one.
+- **Valid until** ends a temporary fact. A bare date means through that day. Times are UTC.
+
+The index derives a `facts` table from these lines whenever the file changes, and rebuilds it from the file on every start, so the file is the only copy that matters. To undo a replacement, delete the `Replaces` line in Obsidian. `brain_identity` serves the facts true now, `brain_facts` answers what was true at another date, and `brain_context` still finds an old fact but marks it as replaced or expired.
 
 </details>
 
@@ -451,7 +487,7 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 - [x] Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5)) — `Dockerfile` + `docker-compose.yml`, see [Run with Docker](#run-with-docker)
 - [ ] Importers for other note tools ([#6](https://github.com/debashishthakur/brain-mcp/issues/6))
 - [ ] Passkey sign-in ([#7](https://github.com/debashishthakur/brain-mcp/issues/7))
-- [ ] Temporal memory ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
+- [x] Facts that change over time: replacements, expiry and history ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
 
 ## Contributing
 
@@ -479,7 +515,7 @@ Each of these is an open issue with a suggested approach and a definition of don
 - **When should retrieval abstain?** Hybrid search refuses all off-topic questions, but also some real ones. Calibrating the floor is open. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
 - **Which reranker gives the best accuracy per millisecond on a CPU?** A model six times faster finds the right note in 58% of everyday questions instead of 75%. ([#10](https://github.com/debashishthakur/brain-mcp/issues/10))
 - **Can the graph a vault already has replace an LLM-built one** for multi-hop questions? ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
-- **How should AI memory handle facts that change over time?** ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
+- **How should AI memory notice that a fact changed?** The memory file now records replacements and expiry, and `brain_facts` answers what was true when. A change the caller does not name is only caught by word overlap within one category; catching it by meaning is open. ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
 - **How do you evaluate retrieval over personal data** without sharing that data? Start with a harder public eval set. ([#4](https://github.com/debashishthakur/brain-mcp/issues/4))
 
 ### How to contribute
@@ -501,10 +537,11 @@ If you use brain-mcp in research or teaching, please cite it. GitHub's **Cite th
 brain-mcp/
 ├── src/
 │   ├── index.ts          entry point: init, stdio, --http, --oauth, --reindex
-│   ├── tools.ts          the 13 MCP tools, resources and prompts
+│   ├── tools.ts          the 14 MCP tools, resources and prompts
 │   ├── context.ts        brain_context: fusion and packing under a budget
 │   ├── identity.ts       the persona bundle
-│   ├── memory.ts         brain_remember and near-duplicate checks
+│   ├── memory.ts         the memory file's blocks and near-duplicate checks
+│   ├── facts.ts          facts with validity windows: replacements, expiry, history
 │   ├── policy.ts         scopes and secret redaction
 │   ├── vault/            parsing notes, the SQLite index, hybrid ranking
 │   │   └── dense.ts      local embeddings and the reranker

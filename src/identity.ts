@@ -2,8 +2,53 @@ import type { ResolvedConfig } from "./config.js";
 import { queryTerms, type VaultIndex, type NoteRow } from "./vault/index.js";
 import type { Policy, Principal } from "./policy.js";
 import { firstParagraph, stripConnections, stripTitleHeading } from "./vault/parse.js";
+import { nowIso, statusAt, type Fact } from "./facts.js";
 
 const clean = (n: NoteRow) => stripTitleHeading(stripConnections(n.body), n.title).trim();
+
+/** Room for captured facts in the bundle. */
+const FACTS_BUDGET = 12000;
+
+/** Over budget, who the owner is and how to work with them stay longest; project facts and pointers go first. */
+const CATEGORY_RANK: Record<string, number> = { user: 0, feedback: 1, project: 2, reference: 3 };
+const rankOf = (category: string) => CATEGORY_RANK[category] ?? 4;
+
+/** A fact as written, minus its Replaces/Supersedes lines: they point at facts the bundle leaves out. */
+function factBlock(f: Fact): string {
+  return f.block
+    .split("\n")
+    .filter((l) => !/^\*\*(Replaces|Supersedes):\*\*/.test(l))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Only facts true now. Replaced, expired and not-yet-valid facts stay in the memory file as history, where
+ * brain_facts finds them. Over budget, keep the highest-ranked categories and, within one, the newest facts;
+ * show what is kept grouped by category, oldest first.
+ */
+function currentFacts(index: VaultIndex, budget: number, file: string): string {
+  const now = nowIso();
+  const all = index.facts.all();
+  const current = all.filter((f) => statusAt(f, now) === "current");
+  const kept: { f: Fact; text: string }[] = [];
+  let used = 0;
+  for (const f of [...current].sort((a, b) => rankOf(a.category) - rankOf(b.category) || b.ord - a.ord)) {
+    const text = factBlock(f);
+    if (used + text.length + 2 > budget) break;
+    kept.push({ f, text });
+    used += text.length + 2;
+  }
+  kept.sort((a, b) => rankOf(a.f.category) - rankOf(b.f.category) || a.f.ord - b.f.ord);
+  const hidden = all.length - current.length;
+  const omitted = current.length - kept.length;
+  const notes = [
+    hidden ? `${hidden} replaced, expired or not-yet-valid fact(s) are kept in \`${file}\` as history; brain_facts with history=true lists them.` : "",
+    omitted ? `${omitted} current fact(s) omitted for size; brain_facts lists them all.` : "",
+  ].filter(Boolean);
+  return [notes.join(" "), ...kept.map((k) => k.text)].filter(Boolean).join("\n\n") || "No current facts.";
+}
 
 function cap(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n).trimEnd() + "\n[… truncated, read the full note with brain_read]";
@@ -118,7 +163,9 @@ export function buildIdentity(cfg: ResolvedConfig, index: VaultIndex, policy: Po
   const captured = index.get(cfg.memoryFile);
   if (captured && policy.canRead(captured, p)) {
     used.push(captured.id);
-    take(`## Facts captured via brain_remember\n\n${capNewest(clean(captured), 12000, cfg.memoryFile)}\n`);
+    // A memory file with no "## <stamp> · <category>" facts (hand-written in another shape) is shown as before.
+    const body = index.facts.all().length ? currentFacts(index, FACTS_BUDGET, cfg.memoryFile) : capNewest(clean(captured), FACTS_BUDGET, cfg.memoryFile);
+    take(`## Facts captured via brain_remember\n\n${body}\n`);
   }
 
   // 4. Skills: how the owner has shaped Claude's behaviour
@@ -156,6 +203,7 @@ export function buildIdentity(cfg: ResolvedConfig, index: VaultIndex, policy: Po
       `- Ground answers in notes: brain_search for anything factual, brain_project before discussing a project, brain_graph to hop between related work.\n` +
       `- Cite note ids (vault paths) when you rely on a note.\n` +
       `- When the owner states a durable preference, decision or fact, save it with brain_remember; when they produce a durable document, save it with brain_capture.\n` +
+      `- When a fact above changes, save the new one with brain_remember and \`replaces\` set to the old fact's id (the stamp in its heading); the old one becomes history. Ask brain_facts what was true at an earlier date.\n` +
       `- Contents are confidential to the owner. Never echo credentials; redacted markers must stay redacted.\n`,
   );
 
