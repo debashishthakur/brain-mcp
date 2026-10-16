@@ -35,6 +35,7 @@ Pick the tool by what the user is after:
 | To plan or discuss a project | `brain_project` first (omit the name to list projects) | `brain_context` for specifics |
 | What's related ("what else touches OAuth?") | `brain_graph` on the note or concept | |
 | What they've been doing ("what was I working on?") | `brain_recent` with `days` | `brain_context` on what stands out |
+| How a recorded fact changed, or what was true on a date ("what did I use before Postgres?") | `brain_facts` with `history: true`, or `as_of` a date | |
 
 How to read the results:
 
@@ -53,7 +54,8 @@ The vault belongs to the owner and every connected AI client reads it, so a care
 | A document: meeting notes, plan, decision record, research summary, session log | `brain_capture` | Goes to `Captures/` with frontmatter; give a noun-phrase `title`, a `kind` and the `project` |
 | A hand-maintained note under `Notes/` or `Captures/` | `brain_write` (new, or `overwrite`), `brain_edit` (one change), `brain_move`, `brain_delete` | Everything outside those folders is generated and read-only. Deletes go to `.trash/` and can be restored |
 
-- **Duplicates.** `brain_remember` refuses near-duplicates of existing memory. That is usually right; tell the user it's already known. Pass `force: true` only when the fact has actually changed.
+- **Duplicates.** `brain_remember` refuses near-duplicates of current facts. That is usually right; tell the user it's already known.
+- **Changes.** When a fact replaces one the identity bundle shows, pass `replaces` with the old fact's id (the stamp in its heading, e.g. `"2026-09-22 18:21"`); the old one stays in the file as history and leaves the bundle. If `brain_remember` holds a fact back because it may change a current one, decide: `replaces` if the old one is now wrong, `force: true` if both stay true. For something temporary ("I'm travelling until Friday"), pass `valid_until`.
 - **No session trivia.** "We fixed a typo in line 40" isn't a memory. "Always run the migration dry-run first" is.
 - **Report what you wrote**: the note id or the stored fact, so the owner knows what changed.
 
