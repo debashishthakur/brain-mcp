@@ -13,8 +13,14 @@ export interface AuditEntry {
   ms: number;
   notes?: string[];
   redactions?: number;
+  /** brain_search / brain_context: the coverage label and the ranker's counts (no text), so refusals can be measured. */
+  coverage?: string;
+  rank?: unknown;
   error?: string;
 }
+
+/** Extra fields a tool may add to its own audit line. */
+export type AuditMeta = Pick<AuditEntry, "coverage" | "rank">;
 
 const MAX_ARG_CHARS = 600;
 
@@ -43,13 +49,15 @@ export class Audit {
     tool: string,
     p: Principal,
     args: unknown,
-    fn: () => Promise<{ result: T; notes?: string[]; redactions?: number }> | { result: T; notes?: string[]; redactions?: number },
+    fn: () =>
+      | Promise<{ result: T; notes?: string[]; redactions?: number; meta?: AuditMeta }>
+      | { result: T; notes?: string[]; redactions?: number; meta?: AuditMeta },
   ): Promise<T> {
     const t0 = Date.now();
     const base = { ts: new Date().toISOString(), transport: p.transport, client: p.clientId, session: p.sessionId, tool, args };
     try {
       const out = await fn();
-      this.write({ ...base, ok: true, ms: Date.now() - t0, notes: out.notes, redactions: out.redactions });
+      this.write({ ...base, ok: true, ms: Date.now() - t0, notes: out.notes, redactions: out.redactions, ...out.meta });
       return out.result;
     } catch (e) {
       this.write({ ...base, ok: false, ms: Date.now() - t0, error: (e as Error).message });

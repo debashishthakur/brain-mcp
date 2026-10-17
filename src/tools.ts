@@ -153,7 +153,7 @@ export function createBrainServer(d: Deps): McpServer {
       const p = principalOf(extra as Extra, d);
       return audit.run("brain_context", p, args, async () => {
         const r = await buildContextHybrid(cfg, index, policy, p, args.question, { project: args.project, budgetChars: args.budget_chars });
-        return { result: text(r.text), notes: r.notes };
+        return { result: text(r.text), notes: r.notes, meta: { coverage: r.coverage, rank: r.stats } };
       });
     },
   );
@@ -178,7 +178,7 @@ export function createBrainServer(d: Deps): McpServer {
     async (args, extra) => {
       const p = principalOf(extra as Extra, d);
       return audit.run("brain_search", p, args, async () => {
-        const { hits, coverage, corrections } = await index.searchHybrid(args.query, {
+        const { hits, coverage, corrections, stats } = await index.searchHybrid(args.query, {
           project: args.project,
           type: args.type,
           topic: args.topic,
@@ -190,11 +190,15 @@ export function createBrainServer(d: Deps): McpServer {
         const spelling = corrections.length ? ` (spelling read as ${corrections.join(", ")})` : "";
         if (!visible.length) {
           const why = coverage === "none" ? "The vault does not record this; say so rather than guessing." : "Try fewer or different keywords, or drop the filters.";
-          return { result: text(`No notes matched "${args.query}"${spelling}. Coverage: ${coverage}. ${why}`), notes: [] };
+          return { result: text(`No notes matched "${args.query}"${spelling}. Coverage: ${coverage}. ${why}`), notes: [], meta: { coverage, rank: stats } };
         }
         const caveat = coverage === "thin" ? " The best match is weak; treat it as partial evidence." : "";
         const lines = visible.map((h) => `- **${h.title}** \`${h.id}\` — ${h.type}${h.project ? ` · ${h.project}` : ""} · ${h.modified}\n  ${policy.redact(h.snippet.replace(/\s+/g, " ")).text}`);
-        return { result: text(`${visible.length} hit(s) for "${args.query}"${spelling}. Coverage: ${coverage}.${caveat}\n\n${lines.join("\n")}`), notes: visible.map((h) => h.id) };
+        return {
+          result: text(`${visible.length} hit(s) for "${args.query}"${spelling}. Coverage: ${coverage}.${caveat}\n\n${lines.join("\n")}`),
+          notes: visible.map((h) => h.id),
+          meta: { coverage, rank: stats },
+        };
       });
     },
   );

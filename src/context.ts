@@ -1,5 +1,5 @@
 import type { ResolvedConfig } from "./config.js";
-import { queryTerms, titleOverlap, RRF_K, TITLE_BONUS, type VaultIndex, type NoteRow, type SectionHit, type RankedSection } from "./vault/index.js";
+import { queryTerms, titleOverlap, RRF_K, TITLE_BONUS, type VaultIndex, type NoteRow, type SectionHit, type RankedSection, type RankStats } from "./vault/index.js";
 import type { Policy, Principal } from "./policy.js";
 
 const STRUCTURAL = new Set(["hub", "concept", "moc", "meta", "guide"]);
@@ -174,6 +174,28 @@ export function buildContext(cfg: ResolvedConfig, index: VaultIndex, policy: Pol
 
 export interface HybridContextResult extends ContextResult {
   coverage: "good" | "thin" | "none" | "lexical";
+  stats: RankStats;
+}
+
+/**
+ * The hybrid pack: relevance order, at most `perNote` sections per note, at most 10 sections, under the character
+ * budget. Exported so the evals score exactly what brain_context would send.
+ */
+export function packSections(sections: RankedSection[], o: { budget: number; perNote: number; maxSectionChars: number }): RankedSection[] {
+  const perNoteCount = new Map<string, number>();
+  const picked: RankedSection[] = [];
+  let used = 0;
+  for (const s of sections) {
+    const n = perNoteCount.get(s.note_id) ?? 0;
+    if (n >= o.perNote) continue;
+    const len = Math.min(s.text.length, o.maxSectionChars);
+    if (picked.length && used + len > o.budget) continue;
+    picked.push(s);
+    perNoteCount.set(s.note_id, n + 1);
+    used += len;
+    if (picked.length >= 10 || used >= o.budget) break;
+  }
+  return picked;
 }
 
 /**
@@ -187,7 +209,7 @@ export async function buildContextHybrid(cfg: ResolvedConfig, index: VaultIndex,
   const budget = Math.max(2000, Math.min(o.budgetChars ?? c.budgetChars, 60000));
   const perNote = Math.max(1, Math.min(o.maxSectionsPerNote ?? c.maxSectionsPerNote, 6));
   const r = await index.rankSections(question, { project: o.project, k: 24, readable: (n) => policy.canRead(n, p) });
-  if (r.coverage === "lexical") return { ...buildContext(cfg, index, policy, p, question, o), coverage: "lexical" };
+  if (r.coverage === "lexical") return { ...buildContext(cfg, index, policy, p, question, o), coverage: "lexical", stats: r.stats };
   const readable = r.sections.filter((s) => policy.canRead(s.note, p));
   if (r.coverage === "none" || !readable.length) {
     return {
@@ -198,23 +220,11 @@ export async function buildContextHybrid(cfg: ResolvedConfig, index: VaultIndex,
       candidates: r.sections.length,
       included: 0,
       coverage: "none",
+      stats: r.stats,
     };
   }
 
-  // Pack: relevance order, at most `perNote` sections per note, at most 10 sections, under the budget.
-  const perNoteCount = new Map<string, number>();
-  const picked: RankedSection[] = [];
-  let used = 0;
-  for (const s of readable) {
-    const n = perNoteCount.get(s.note_id) ?? 0;
-    if (n >= perNote) continue;
-    const len = Math.min(s.text.length, c.maxSectionChars);
-    if (picked.length && used + len > budget) continue;
-    picked.push(s);
-    perNoteCount.set(s.note_id, n + 1);
-    used += len;
-    if (picked.length >= 10 || used >= budget) break;
-  }
+  const picked = packSections(readable, { budget, perNote, maxSectionChars: c.maxSectionChars });
 
   const order: string[] = [];
   const groups = new Map<string, RankedSection[]>();
@@ -249,5 +259,5 @@ export async function buildContextHybrid(cfg: ResolvedConfig, index: VaultIndex,
       parts.push(policy.redact(text).text + "\n");
     }
   });
-  return { text: parts.join("\n"), notes: order, candidates: r.sections.length, included: picked.length, coverage: r.coverage };
+  return { text: parts.join("\n"), notes: order, candidates: r.sections.length, included: picked.length, coverage: r.coverage, stats: r.stats };
 }

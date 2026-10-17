@@ -28,6 +28,8 @@ export interface DenseConfig {
   /** Keep hits scoring at least this fraction of the best hit. */
   keepRatio: number;
   earlyExit: boolean;
+  /** Rerank each list's first pick wherever fusion put it. Off reproduces 0.4.0, which only reranked the top `rerankN`. */
+  firstPicks: boolean;
   aliases: Record<string, string>;
 }
 
@@ -42,6 +44,7 @@ export const DENSE_DEFAULTS: DenseConfig = {
   floor: 0.05,
   keepRatio: 0.3,
   earlyExit: true,
+  firstPicks: true,
   // Generic shorthands only. Put your own (project nicknames, people, places) under
   // `retrieval.aliases` in brain.config.json; they are merged on top of these.
   aliases: {
@@ -245,8 +248,12 @@ export class DenseIndex {
   }
 
   // ------------------------------------------------------------ queries
-  /** Cosine top-k over every embedded section. Brute force: a few thousand dot products is well under a millisecond. */
-  async search(query: string, k = 40): Promise<DenseHit[]> {
+  /**
+   * Cosine of the query against every embedded section, best first; ties go to the lower note id, then the lower
+   * ordinal, so the order is the same on every machine. Brute force: a few thousand dot products is well under a
+   * millisecond.
+   */
+  async scoreAll(query: string): Promise<DenseHit[]> {
     if (!(await this.ready())) return [];
     this.loadMatrix();
     if (!this.keys.length) return [];
@@ -260,8 +267,16 @@ export class DenseIndex {
       for (let j = 0; j < d; j++) s += this.mat[o + j] * q[j];
       scores[i] = s;
     }
-    const idx = Array.from(scores.keys()).sort((a, b) => scores[b] - scores[a]).slice(0, k);
-    return idx.map((i) => ({ ...this.keys[i], score: scores[i] }));
+    const keys = this.keys;
+    const idx = Array.from(scores.keys()).sort(
+      (a, b) => scores[b] - scores[a] || (keys[a].note_id < keys[b].note_id ? -1 : keys[a].note_id > keys[b].note_id ? 1 : keys[a].ord - keys[b].ord),
+    );
+    return idx.map((i) => ({ ...keys[i], score: scores[i] }));
+  }
+
+  /** Cosine top-k over every embedded section (see scoreAll for the order). */
+  async search(query: string, k = 40): Promise<DenseHit[]> {
+    return (await this.scoreAll(query)).slice(0, k);
   }
 
   /** Cross-encoder probabilities for (query, passage) pairs, in input order. */

@@ -209,8 +209,8 @@ node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
-node scripts/eval-hybrid.mjs     # 15 harder questions: paraphrase, typo, identifier, date, multi-hop, alias, off-topic
-node scripts/debug-rank.mjs "your question"   # trace one query through every ranking step
+node scripts/eval-hybrid.mjs     # 26 harder questions: paraphrase, typo, identifier, date, two-note, alias, off-topic
+node scripts/debug-rank.mjs "your question"   # trace one query: each list, the reranker shortlist and why entries were cut
 ```
 
 If `npm install` reports held-back install scripts, the two packages that need them (`better-sqlite3` and `esbuild`) are already listed under `allowScripts` in `package.json`. Run `npm install-scripts approve better-sqlite3 esbuild` if your npm still asks. The scripts of `onnxruntime-node` and `protobufjs` are not needed for CPU use.
@@ -243,14 +243,16 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Keyword only | 42% | 100% | 100% | 2 ms |
 | Hybrid (default) | **83%** | 100% | 100% | about 1.1 s |
 
-**`eval-hybrid.mjs`**, 15 harder questions:
+**`eval-hybrid.mjs`**, 26 harder questions, 11 of them needing two notes:
 
-| Ranker | Right note first | Right note in top 5 | Off-topic questions refused |
-| --- | --- | --- | --- |
-| Keyword only | 67% | 100% | 2 of 3 |
-| Hybrid (default) | 67% | 75% | **3 of 3** |
+| Ranker | Right note first | Right note in top 5 | Off-topic questions refused | Two-note questions with both notes in the context pack |
+| --- | --- | --- | --- | --- |
+| Keyword only | 77% | 100% | 2 of 4 | – |
+| Hybrid (default) | 73% | 82% | **3 of 4** | 7 of 11 |
 
-Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is paraphrase: on the harder set it still misses some real questions asked in other words, such as "why is the bird audio never sent to an online service". Calibrating the "nothing relevant" floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
+Hybrid search refuses questions the vault cannot answer, but it also refuses some real ones and trims away the second note of a two-note answer. The script follows every note an answer needs through the ranker. On this vault all of them reach the reranker's shortlist; four are then trimmed and two are lost to refusals. Its weak spot is paraphrase: "why is the bird audio never sent to an online service" is still refused. Calibrating the "nothing relevant" floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10).
+
+To score your own vault, write cases with the notes each answer needs (`required`) and the sentences that prove it (`evidence`: a list of groups, each holding alternative spans of which one must be in the context pack), then run `node scripts/eval-hybrid.mjs --config <your config> --cases <your cases>`. `--set key=value` tries another setting (`--set rerankN=8`), `--sweep key=a,b,c` compares several in one run, `--repeat 2` checks that two runs agree exactly, and `--json` keeps every result.
 
 ## Use your own vault
 

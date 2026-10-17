@@ -144,6 +144,41 @@ export interface RankedSection {
   why: string[];
 }
 
+/** Counts for the audit log and the evals: list sizes, fused candidates, how many reached and passed the reranker. */
+export interface RankStats {
+  lists: { lex: number; den: number; exact: number; note: number };
+  fused: number;
+  /** Sections handed to the reranker stage (or kept, on the keyword-only path). */
+  pool: number;
+  /** Pairs the cross-encoder actually scored. */
+  reranked: number;
+  /** Best reranker probability; null when the reranker did not run. */
+  topProb: number | null;
+}
+
+/** Why a pooled section did or did not reach the result: kept, refused by the floor, trimmed by keepRatio, or past k. */
+export type PoolCut = "kept" | "floor" | "trim" | "limit";
+
+export interface PoolEntry {
+  key: string;
+  /** head: inside the top `rerankN` of the fused list · first: a list's first pick added below it */
+  src: "head" | "first";
+  /** 1-based position in the fused list. */
+  fusedRank: number;
+  reranked: boolean;
+  prob: number | null;
+  score: number | null;
+  cut: PoolCut;
+}
+
+/** The ranker's working state for one query, returned only when asked for (`debug: true`). */
+export interface RankDebug {
+  lists: { lex: string[]; den: string[]; exact: string[]; note: string[] };
+  /** Fused order, best first (at most 200). */
+  fused: { key: string; score: number }[];
+  pool: PoolEntry[];
+}
+
 export interface RankResult {
   sections: RankedSection[];
   /** good: confident hit · thin: weak best hit, answer with a caveat · none: the vault is silent · lexical: models unavailable, keyword ranking only */
@@ -152,12 +187,15 @@ export interface RankResult {
   terms: string[];
   earlyExit: boolean;
   ms: number;
+  stats: RankStats;
+  debug?: RankDebug;
 }
 
 export interface HybridSearchResult {
   hits: SearchHit[];
   coverage: RankResult["coverage"];
   corrections: string[];
+  stats: RankStats;
 }
 
 /** Reciprocal rank fusion over ranked lists keyed by section. */
@@ -248,7 +286,9 @@ export class VaultIndex {
   }
 
   private *walk(dir: string): Generator<string> {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    // Sorted by byte order: row order decides exact ties in BM25, and readdir order differs between filesystems.
+    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
       const abs = path.join(dir, ent.name);
       if (this.isIgnored(abs)) continue;
       if (ent.isDirectory()) yield* this.walk(abs);
@@ -640,7 +680,7 @@ export class VaultIndex {
    * rerank of the top `rerankN` (only the top 3 when BM25 and dense already agree on #1) → blended score
    * → gate. Falls back to keyword-only fusion (coverage "lexical") when the models are unavailable.
    */
-  async rankSections(query: string, o: SearchOptions & { k?: number } = {}): Promise<RankResult> {
+  async rankSections(query: string, o: SearchOptions & { k?: number; debug?: boolean } = {}): Promise<RankResult> {
     const t0 = Date.now();
     const rc = this.cfg.retrieval;
     const k = Math.min(Math.max(o.k ?? 10, 1), 50);
@@ -675,6 +715,20 @@ export class VaultIndex {
       if (!note || !sec) return null;
       return { note_id: item.note_id, ord: item.ord, heading: sec.heading, text: sec.text, note, score, rprob, why };
     };
+    const stats: RankStats = {
+      lists: { lex: lex.length, den: den.length, exact: exact.length, note: noteList.length },
+      fused: fused.length,
+      pool: 0,
+      reranked: 0,
+      topProb: null,
+    };
+    const debug: RankDebug | undefined = o.debug
+      ? {
+          lists: { lex: lex.map((x) => x.key), den: den.map((x) => x.key), exact: exact.map((x) => x.key), note: noteList.map((x) => x.key) },
+          fused: fused.slice(0, 200).map((f) => ({ key: f.key, score: f.score })),
+          pool: [],
+        }
+      : undefined;
     const done = (sections: RankedSection[], coverage: RankResult["coverage"], earlyExit: boolean): RankResult => ({
       sections,
       coverage,
@@ -682,6 +736,8 @@ export class VaultIndex {
       terms: u.terms,
       earlyExit,
       ms: Date.now() - t0,
+      stats,
+      ...(debug ? { debug } : {}),
     });
     if (!fused.length) return done([], modelsOk ? "none" : "lexical", false);
     const fusedTop = fused[0].score;
@@ -692,22 +748,33 @@ export class VaultIndex {
         const s = materialise(f.item, f.score / fusedTop, NaN, ["keyword fusion"]);
         if (s) out.push(s);
       }
+      stats.pool = out.length;
+      if (debug)
+        debug.pool = fused.slice(0, k).map((f, i) => ({ key: f.key, src: "head", fusedRank: i + 1, reranked: false, prob: null, score: f.score / fusedTop, cut: "kept" }));
       return done(out, "lexical", false);
     }
 
     const cands = fused.slice(0, rc.rerankN);
-    // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
-    // the long memory file, can fall far below other notes' first windows that collect votes from several lists.
-    for (const best of [lex[0], den[0], exact[0], noteList[0]]) {
-      if (!best || cands.some((c) => c.key === best.key)) continue;
-      const f = fused.find((x) => x.key === best.key);
-      if (f) cands.push(f);
+    const headN = cands.length;
+    if (rc.firstPicks) {
+      // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
+      // the long memory file, can fall far below other notes' first windows that collect votes from several lists.
+      for (const best of [lex[0], den[0], exact[0], noteList[0]]) {
+        if (!best || cands.some((c) => c.key === best.key)) continue;
+        const f = fused.find((x) => x.key === best.key);
+        if (f) cands.push(f);
+      }
     }
     // The shortcut needs the agreed section inside the reranked head. The note-level list can lift other notes'
     // first windows above it (a long note such as the memory file competes there through its first window only),
-    // and a head without it would gate a well-answered query to "none".
+    // and a head without it would gate a well-answered query to "none". With firstPicks off this is 0.4.0's rule,
+    // which took the shortcut whenever the two lists agreed.
     const agree =
-      rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key && cands.slice(0, 3).some((c) => c.key === lex[0].key);
+      rc.earlyExit &&
+      lex.length > 0 &&
+      den.length > 0 &&
+      lex[0].key === den[0].key &&
+      (!rc.firstPicks || cands.slice(0, 3).some((c) => c.key === lex[0].key));
     const passage = (c: { item: { note_id: string; ord: number } }) => {
       const note = noteOf(c.item.note_id);
       const sec = secStmt.get(c.item.note_id, c.item.ord) as { heading: string; text: string } | undefined;
@@ -726,17 +793,41 @@ export class VaultIndex {
     }
     const reranked = agree ? Math.min(3, cands.length) : cands.length;
     const topR = Math.max(...probs.slice(0, reranked));
+    stats.pool = cands.length;
+    stats.reranked = reranked;
+    stats.topProb = topR;
+    const fusedRankOf = new Map(fused.map((f, i) => [f.key, i + 1]));
+    const pool: PoolEntry[] = cands.map((c, i) => ({
+      key: c.key,
+      src: i < headN ? "head" : "first",
+      fusedRank: fusedRankOf.get(c.key) ?? 0,
+      reranked: i < reranked,
+      prob: i < reranked ? probs[i] : null,
+      score: null,
+      cut: "floor",
+    }));
+    if (debug) debug.pool = pool;
     if (topR < rc.floor) return done([], "none", agree);
-    const scored = cands.map((c, i) => ({ c, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
+    const scored = cands.map((c, i) => ({ c, i, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
     scored.sort((a, b) => b.score - a.score);
     const top = scored[0].score;
     const out: RankedSection[] = [];
+    // Sorted best first, so once one entry is trimmed or past k, every later one is too.
+    let stop: PoolCut | null = null;
     for (const s of scored) {
-      if (s.score < Math.max(0.02, rc.keepRatio * top)) break;
+      pool[s.i].score = s.score;
+      if (!stop && s.score < Math.max(0.02, rc.keepRatio * top)) stop = "trim";
+      if (!stop && out.length >= k) stop = "limit";
+      if (stop) {
+        pool[s.i].cut = stop;
+        continue;
+      }
       const why = [s.reranked ? `rerank ${s.prob.toFixed(2)}` : "fused tail", ...(lex.some((x) => x.key === s.c.key) ? ["keyword"] : []), ...(den.some((x) => x.key === s.c.key) ? ["semantic"] : []), ...(exact.some((x) => x.key === s.c.key) ? ["exact date"] : []), ...(noteList.some((x) => x.key === s.c.key) ? ["title"] : [])];
       const sec = materialise(s.c.item, s.score, s.reranked ? s.prob : NaN, why);
-      if (sec) out.push(sec);
-      if (out.length >= k) break;
+      if (sec) {
+        out.push(sec);
+        pool[s.i].cut = "kept";
+      }
     }
     return done(out, topR >= 0.3 ? "good" : "thin", agree);
   }
@@ -756,7 +847,7 @@ export class VaultIndex {
       snippet: `${s.heading && s.heading !== s.note.title ? `[${s.heading}] ` : ""}${s.text.replace(/^#+\s.*\n?/, "").replace(/\s+/g, " ").slice(0, 220)}`,
       score: s.score,
     }));
-    return { hits, coverage: r.coverage, corrections: r.corrections };
+    return { hits, coverage: r.coverage, corrections: r.corrections, stats: r.stats };
   }
 
   section(noteId: string, ord: number): SectionRow | undefined {
