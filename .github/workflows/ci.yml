@@ -57,6 +57,8 @@ jobs:
         run: node scripts/verify-ranking.mjs
       - name: Private notes stay out of ranking, search, context and links
         run: node scripts/verify-policy.mjs
+      - name: Link graph (link kinds, target resolution, window cuts)
+        run: node scripts/verify-graph.mjs
       - name: Retrieval eval, keyword vs hybrid
         run: node scripts/eval-retrieval.mjs
       - name: Hard eval set (fails only if two runs disagree)

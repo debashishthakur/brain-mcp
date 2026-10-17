@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { GRAPH_DEFAULTS, type GraphConfig } from "./graph.js";
 
 /**
  * Local dense retrieval for the vault: section embeddings (bge-small, int8) stored next to the FTS
@@ -45,9 +46,12 @@ export interface DenseConfig {
    */
   firstPicks: boolean;
   aliases: Record<string, string>;
+  /** The link graph: how links are weighted, and whether linked sections join the reranker shortlist. */
+  graph: GraphConfig;
 }
 
 export const DENSE_DEFAULTS: DenseConfig = {
+  graph: GRAPH_DEFAULTS,
   hybrid: true,
   embedModel: "Xenova/bge-small-en-v1.5",
   rerankModel: "Xenova/bge-reranker-base",

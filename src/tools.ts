@@ -640,7 +640,7 @@ export function createBrainServer(d: Deps): McpServer {
   const linksInto = (id: string, p: Principal) => {
     const refs = readable(index.backlinks(id, 50), p).flatMap((n) => index.outgoing(n.id).filter((o) => o.note?.id === id).map((o) => ({ from: n.id, target: o.target })));
     return () => {
-      const broken = [...new Set(refs.filter((r) => !index.resolve(r.target)).map((r) => r.from))];
+      const broken = [...new Set(refs.filter((r) => !index.resolveLink(r.from, r.target)).map((r) => r.from))];
       return broken.length ? `\n\n${broken.length} note(s) now have links that resolve to nothing: ${broken.slice(0, 5).map((b) => `\`${b}\``).join(", ")}.` : "";
     };
   };

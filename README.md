@@ -206,12 +206,14 @@ node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway a
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
 node scripts/verify-ranking.mjs  # the ranker's last step with stand-in models: empty shortlist, notes without sections, agreeOverride
 node scripts/verify-policy.mjs   # notes a connection may not read never rank, appear or get named in a links line
+node scripts/verify-graph.mjs    # link kinds, every way of writing a link target, duplicate names, the window each link sits in
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
 node scripts/eval-hybrid.mjs     # 26 harder questions: paraphrase, typo, identifier, date, two-note, alias, off-topic
 node scripts/debug-rank.mjs "your question"   # trace one query: each list, the reranker shortlist and why entries were cut
+node scripts/graph-stats.mjs     # your link graph: links by where they sit, links written between content notes, unresolved names
 ```
 
 If `npm install` reports held-back install scripts, the two packages that need them (`better-sqlite3` and `esbuild`) are already listed under `allowScripts` in `package.json`. Run `npm install-scripts approve better-sqlite3 esbuild` if your npm still asks. The scripts of `onnxruntime-node` and `protobufjs` are not needed for CPU use.
@@ -292,7 +294,7 @@ Any Markdown file in the vault is indexed. Frontmatter makes it richer:
 | `modified` | Date used for recency, `brain_recent` and the identity focus list. Falls back to the file's mtime. |
 | `note-count`, `last-touched` | Shown next to each hub in the identity bundle. |
 
-Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become graph edges. A leading `# Title` that repeats the title is dropped from what clients read, and a generated `## Connections` trailer after a `---` rule is left out of search and context.
+Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`, `[[Folder/Note]]`) and in frontmatter become graph edges. Each link is recorded with where it sits, because that says how much the author meant it: inside a sentence, in a list item that explains it, as a bare list entry, in a heading or table, in frontmatter, or in a generated `## Connections` trailer. Links inside code and embeds of images or other attachments are not links. A target resolves by path (or its end, as in `[[Notes/Plan]]`), title, file name or alias, ignoring case, `.md`, extra whitespace, and hyphens or underscores versus spaces; when several notes share a name, the one in the linking note's folder wins, then the shortest path. `brain_graph`, the links line of `brain_read` and the warnings of `brain_move` and `brain_delete` all follow these rules. In frontmatter, `project`, `topics`, `related` and `part-of` are links for every tool, plain names included; a `[[link]]` under any other key counts for the link graph only. A leading `# Title` that repeats the title is dropped from what clients read, and a generated `## Connections` trailer after a `---` rule is left out of search and context.
 
 </details>
 

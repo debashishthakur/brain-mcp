@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
-import { parseNoteFile, splitSections, stripConnections, toId, type ParsedNote } from "./parse.js";
+import { linkWindows, parseNoteFile, splitSections, stripConnections, toId, type ParsedNote } from "./parse.js";
+import { LinkGraph } from "./graph.js";
 import { DenseIndex } from "./dense.js";
 import { FactStore } from "../facts.js";
 import type { ResolvedConfig } from "../config.js";
@@ -83,6 +84,17 @@ CREATE TABLE IF NOT EXISTS links (
   PRIMARY KEY (from_id, target)
 );
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
+CREATE TABLE IF NOT EXISTS edges (
+  from_id TEXT NOT NULL,
+  pos INTEGER NOT NULL,
+  from_ord INTEGER,
+  kind TEXT NOT NULL,
+  fm_key TEXT,
+  target TEXT NOT NULL,
+  target_heading TEXT,
+  ctx TEXT,
+  PRIMARY KEY (from_id, pos)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
   note_id UNINDEXED,
   title,
@@ -248,6 +260,8 @@ export class VaultIndex {
   readonly dense: DenseIndex | null;
   /** Facts from the memory file with their validity windows, rebuilt whenever that file is indexed. */
   readonly facts: FactStore;
+  /** Link occurrences resolved to notes and weighted, rebuilt lazily after any change. */
+  readonly graph: LinkGraph;
   private readonly memoryId: string;
   private watcher: FSWatcher | null = null;
   private pending = new Map<string, NodeJS.Timeout>();
@@ -258,6 +272,7 @@ export class VaultIndex {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
     this.dense = cfg.retrieval.hybrid ? new DenseIndex(this.db, cfg.modelsDir, cfg.retrieval) : null;
+    this.graph = new LinkGraph(this.db, cfg.retrieval);
     this.memoryId = cfg.memoryFile.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
     this.facts = new FactStore(this.db);
     // An index built before the facts table existed already holds the memory file: derive the table from it now.
@@ -346,6 +361,7 @@ export class VaultIndex {
     db.prepare("DELETE FROM note_topics WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM note_tags WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM links WHERE from_id = ?").run(n.id);
+    db.prepare("DELETE FROM edges WHERE from_id = ?").run(n.id);
     db.prepare("DELETE FROM sections WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(n.id);
@@ -386,14 +402,20 @@ export class VaultIndex {
     // sections_fts2 carries the note title, project and topics on every window so a title match counts in section BM25.
     const insSecFts2 = db.prepare("INSERT INTO sections_fts2 (note_id,ord,title,heading,text,project,topics) VALUES (?,?,?,?,?,?,?)");
     const topics = n.topics.join(" ");
+    const sections = splitSections(n.body);
     let count = 0;
-    for (const s of splitSections(n.body)) {
+    for (const s of sections) {
       const heading = s.heading || n.title;
       insSec.run(n.id, s.ord, heading, s.level, s.text);
       insSecFts.run(n.id, s.ord, heading, s.text);
       insSecFts2.run(n.id, s.ord, n.title, heading, s.text, n.project ?? "", topics);
       count++;
     }
+    // Every link occurrence, with the section window it sits in; resolution to notes happens in the graph.
+    const insEdge = db.prepare("INSERT INTO edges (from_id,pos,from_ord,kind,fm_key,target,target_heading,ctx) VALUES (?,?,?,?,?,?,?,?)");
+    const ords = linkWindows(n.body, n.linkOccs, sections);
+    n.linkOccs.forEach((o, i) => insEdge.run(n.id, o.pos, ords[i], o.kind, o.fmKey, o.target, o.heading, o.ctx));
+    this.graph.markDirty();
     // Keep vectors for ordinals that still exist (their hash decides whether they are re-embedded); drop the rest.
     this.dense?.forget(n.id, count);
     if (this.isMemoryFile(n.id)) this.facts.rebuild(n.body);
@@ -407,6 +429,8 @@ export class VaultIndex {
       this.db.prepare("DELETE FROM note_topics WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM note_tags WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM links WHERE from_id = ?").run(id);
+      this.db.prepare("DELETE FROM edges WHERE from_id = ?").run(id);
+      this.graph.markDirty();
       this.db.prepare("DELETE FROM sections WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(id);
@@ -461,18 +485,32 @@ export class VaultIndex {
     return this.db.prepare("SELECT * FROM notes WHERE id = ?").get(id) as NoteRow | undefined;
   }
 
-  /** Resolve a note by id (path), title, alias, or basename. */
+  /**
+   * Resolve a note someone names (a tool argument): its id (path, in any case, .md optional), then a title, file name
+   * or alias (a hub wins a shared name, then a concept page, then the newest note), then the link rules: path suffix,
+   * names ignoring hyphens and underscores, retrieval shorthands (see LinkGraph.resolve).
+   */
   resolve(ref: string): NoteRow | undefined {
     const r = ref.trim().replace(/^\[\[|\]\]$/g, "");
     const direct = this.get(r) ?? this.get(r.endsWith(".md") ? r : `${r}.md`);
     if (direct) return direct;
+    const lower = r.toLowerCase();
+    const anyCase = this.db.prepare("SELECT * FROM notes WHERE lower(id) IN (?, ?) ORDER BY id LIMIT 1").get(lower, lower.endsWith(".md") ? lower : `${lower}.md`) as NoteRow | undefined;
+    if (anyCase) return anyCase;
     const rows = this.db
       .prepare(
         `SELECT n.* FROM titles t JOIN notes n ON n.id = t.note_id WHERE t.name = ?
-         ORDER BY CASE n.type WHEN 'hub' THEN 0 WHEN 'concept' THEN 1 ELSE 2 END, n.modified DESC LIMIT 1`,
+         ORDER BY CASE n.type WHEN 'hub' THEN 0 WHEN 'concept' THEN 1 ELSE 2 END, n.modified DESC, n.id LIMIT 1`,
       )
-      .all(r.toLowerCase()) as NoteRow[];
-    return rows[0];
+      .all(lower) as NoteRow[];
+    if (rows[0]) return rows[0];
+    return r ? this.resolveLink("", r) : undefined;
+  }
+
+  /** The note a link written in `fromId` points at, by the link rules (see LinkGraph.resolve). */
+  resolveLink(fromId: string, target: string): NoteRow | undefined {
+    const to = this.graph.resolve(fromId, target);
+    return to ? this.get(to) : undefined;
   }
 
   count(): number {
@@ -583,7 +621,9 @@ export class VaultIndex {
     const corrections: string[] = [];
     const aliases = this.cfg.retrieval.aliases;
     for (const t of raw) {
-      if (aliases[t]) for (const x of queryTerms(aliases[t])) out.add(x);
+      // Own keys only: the term "constructor" must not reach Object.prototype.
+      const expanded = Object.hasOwn(aliases, t) ? aliases[t] : undefined;
+      if (typeof expanded === "string") for (const x of queryTerms(expanded)) out.add(x);
       out.add(t);
       const c = this.dense?.correct(t);
       if (c && (!readable || this.wordReadable(c, readable))) {
@@ -592,7 +632,7 @@ export class VaultIndex {
       }
     }
     const lq = q.toLowerCase();
-    for (const [k, v] of Object.entries(aliases)) if (k.includes(" ") && lq.includes(k)) for (const x of queryTerms(v)) out.add(x);
+    for (const [k, v] of Object.entries(aliases)) if (typeof v === "string" && k.includes(" ") && lq.includes(k)) for (const x of queryTerms(v)) out.add(x);
     return { terms: [...out], corrections };
   }
 
@@ -926,21 +966,21 @@ export class VaultIndex {
     return (this.db.prepare("SELECT tag FROM note_tags WHERE note_id = ? ORDER BY tag").all(id) as { tag: string }[]).map((r) => r.tag);
   }
 
+  /** The links a note makes (ParsedNote.links), each resolved by the link rules; `note` is undefined when nothing matches. */
   outgoing(id: string): { target: string; note: NoteRow | undefined }[] {
     const rows = this.db.prepare("SELECT target FROM links WHERE from_id = ? ORDER BY target").all(id) as { target: string }[];
-    return rows.map((r) => ({ target: r.target, note: this.resolve(r.target) }));
+    return rows.map((r) => ({ target: r.target, note: this.resolveLink(id, r.target) }));
   }
 
+  /** Notes whose links resolve to this one (same rules as outgoing), newest first. */
   backlinks(id: string, limit = 100): NoteRow[] {
-    const names = (this.db.prepare("SELECT name FROM titles WHERE note_id = ?").all(id) as { name: string }[]).map((r) => r.name);
-    if (!names.length) return [];
-    const q = names.map(() => "?").join(",");
-    return this.db
-      .prepare(
-        `SELECT DISTINCT n.* FROM links l JOIN notes n ON n.id = l.from_id
-         WHERE l.target IN (${q}) AND n.id != ? ORDER BY n.modified DESC LIMIT ?`,
-      )
-      .all(...names, id, limit) as NoteRow[];
+    return this.graph
+      .linkers(id)
+      .filter((from) => from !== id)
+      .map((from) => this.get(from))
+      .filter((n): n is NoteRow => !!n)
+      .sort((a, b) => (a.modified !== b.modified ? (a.modified < b.modified ? 1 : -1) : a.id < b.id ? -1 : 1))
+      .slice(0, limit);
   }
 
   sharedTopicNeighbours(id: string, limit = 10): { note: NoteRow; shared: string[] }[] {
