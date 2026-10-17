@@ -178,7 +178,14 @@ export function createBrainServer(d: Deps): McpServer {
     async (args, extra) => {
       const p = principalOf(extra as Extra, d);
       return audit.run("brain_search", p, args, async () => {
-        const { hits, coverage, corrections } = await index.searchHybrid(args.query, { project: args.project, type: args.type, topic: args.topic, since: args.since, limit: args.limit * 2 });
+        const { hits, coverage, corrections } = await index.searchHybrid(args.query, {
+          project: args.project,
+          type: args.type,
+          topic: args.topic,
+          since: args.since,
+          limit: args.limit * 2,
+          readable: (n) => policy.canRead(n, p),
+        });
         const visible = hits.filter((h) => policy.canRead({ id: h.id, project: h.project, visibility: index.get(h.id)?.visibility ?? null }, p)).slice(0, args.limit);
         const spelling = corrections.length ? ` (spelling read as ${corrections.join(", ")})` : "";
         if (!visible.length) {
@@ -218,7 +225,12 @@ export function createBrainServer(d: Deps): McpServer {
         }
         const r = policy.redact(body.trim());
         const out = n.project ? [n.project] : [];
-        const related = index.outgoing(n.id).filter((l) => l.note && l.note.id !== n.id).map((l) => l.note!.title).filter((t) => !out.includes(t));
+        // Only notes this caller may read: a private note's title must not leak through someone else's links.
+        const related = index
+          .outgoing(n.id)
+          .filter((l) => l.note && l.note.id !== n.id && policy.canRead(l.note, p))
+          .map((l) => l.note!.title)
+          .filter((t) => !out.includes(t));
         const header = `# ${n.title}\n\`${n.id}\` · ${meta(n, index)}${related.length ? `\nlinks: ${[...new Set(related)].slice(0, 25).join(", ")}` : ""}\n\n`;
         return { result: text(header + r.text), notes: [n.id], redactions: r.count };
       });
@@ -480,7 +492,7 @@ export function createBrainServer(d: Deps): McpServer {
 
         // Related generated memory notes, for the caller's awareness only.
         const related = index
-          .search(args.fact, { project: cfg.identity.memoryProject, limit: 3 })
+          .search(args.fact, { project: cfg.identity.memoryProject, limit: 3, readable: (n) => policy.canRead(n, p) })
           .filter((h) => h.id !== cfg.memoryFile)
           .map((h) => h.title);
         existing = existing.replace(/^modified: .*$/m, `modified: ${today()}`);
@@ -619,9 +631,10 @@ export function createBrainServer(d: Deps): McpServer {
     return { note, ...writable(note.id) };
   };
   /** Record the links that resolve to a note now; the returned check, run after the note moved or went,
-   *  reports only those that no longer resolve (a same-titled note or a kept title can still catch them). */
-  const linksInto = (id: string) => {
-    const refs = index.backlinks(id, 50).flatMap((n) => index.outgoing(n.id).filter((o) => o.note?.id === id).map((o) => ({ from: n.id, target: o.target })));
+   *  reports only those that no longer resolve (a same-titled note or a kept title can still catch them).
+   *  Only notes the caller may read are named: a private note must not show up through the links it makes. */
+  const linksInto = (id: string, p: Principal) => {
+    const refs = readable(index.backlinks(id, 50), p).flatMap((n) => index.outgoing(n.id).filter((o) => o.note?.id === id).map((o) => ({ from: n.id, target: o.target })));
     return () => {
       const broken = [...new Set(refs.filter((r) => !index.resolve(r.target)).map((r) => r.from))];
       return broken.length ? `\n\n${broken.length} note(s) now have links that resolve to nothing: ${broken.slice(0, 5).map((b) => `\`${b}\``).join(", ")}.` : "";
@@ -687,7 +700,7 @@ export function createBrainServer(d: Deps): McpServer {
         const notes: string[] = [];
         if (args.type === "hub") {
           notes.push(`Hub "${args.title}" now groups every note whose frontmatter project is [[${args.title}]].`);
-          const twin = index.hubs().find((h) => h.title.toLowerCase() === args.title.toLowerCase() && h.id !== rel);
+          const twin = readable(index.hubs(), p).find((h) => h.title.toLowerCase() === args.title.toLowerCase() && h.id !== rel);
           if (twin) notes.push(`Another hub with this title exists at \`${twin.id}\`; remove one of them.`);
         }
         if (args.project && !projectHub) notes.push(`No hub named "${args.project}" exists yet; the project link stays unresolved until one does.`);
@@ -761,7 +774,7 @@ export function createBrainServer(d: Deps): McpServer {
         const from = writableNote(args.note, p);
         const to = writable(args.to);
         if (fs.existsSync(to.abs)) return { result: fail(`\`${to.rel}\` already exists.`), notes: [from.rel] };
-        const brokenAfter = linksInto(from.note.id);
+        const brokenAfter = linksInto(from.note.id, p);
         fs.mkdirSync(path.dirname(to.abs), { recursive: true });
         fs.renameSync(from.abs, to.abs);
         index.upsertFile(from.abs);
@@ -786,7 +799,7 @@ export function createBrainServer(d: Deps): McpServer {
       const p = principalOf(extra as Extra, d);
       return guardedWrite("brain_delete", p, args, () => {
         const { note, abs, rel } = writableNote(args.note, p);
-        const brokenAfter = linksInto(note.id);
+        const brokenAfter = linksInto(note.id, p);
         const trashRel = `.trash/${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)} ${path.posix.basename(rel)}`;
         const trashAbs = path.join(cfg.vaultDir, trashRel);
         fs.mkdirSync(path.dirname(trashAbs), { recursive: true });

@@ -53,6 +53,8 @@ jobs:
         run: node scripts/verify-oauth.mjs
       - name: Hybrid retrieval (models, refusal, spelling, identifiers)
         run: node scripts/verify-hybrid.mjs
+      - name: Private notes stay out of ranking, search, context and links
+        run: node scripts/verify-policy.mjs
       - name: Retrieval eval, keyword vs hybrid
         run: node scripts/eval-retrieval.mjs
       - name: Hard eval set

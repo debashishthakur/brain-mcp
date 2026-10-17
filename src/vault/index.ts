@@ -38,6 +38,8 @@ export interface SearchOptions {
   since?: string; // YYYY-MM-DD
   until?: string;
   limit?: number;
+  /** Notes the caller may read. Ranking drops the rest before fusion, so they never take a reranker slot or decide coverage. */
+  readable?: (n: NoteRow) => boolean;
 }
 
 const SCHEMA = `
@@ -469,18 +471,17 @@ export class VaultIndex {
     const quoted = terms.map((t) => `"${t}"*`);
     const fetchLimit = Math.min(limit * 3, 150);
     const run = (match: string): SearchHit[] => {
-      const params: Record<string, unknown> = { match, limit: fetchLimit };
+      const params: Record<string, unknown> = { match };
       const filter = this.buildFilter(o, params);
-      return this.db
-        .prepare(
-          `SELECT n.id, n.title, n.type, n.project, n.modified,
-                  snippet(notes_fts, 2, '**', '**', ' ... ', 28) AS snippet,
-                  bm25(notes_fts, 0, 4.0, 1.0) AS score
-           FROM notes_fts JOIN notes n ON n.id = notes_fts.note_id
-           WHERE notes_fts MATCH @match ${filter}
-           ORDER BY score LIMIT @limit`,
-        )
-        .all(params) as SearchHit[];
+      const stmt = this.db.prepare(
+        `SELECT n.id, n.title, n.type, n.project, n.modified,
+                snippet(notes_fts, 2, '**', '**', ' ... ', 28) AS snippet,
+                bm25(notes_fts, 0, 4.0, 1.0) AS score
+         FROM notes_fts JOIN notes n ON n.id = notes_fts.note_id
+         WHERE notes_fts MATCH @match ${filter}
+         ORDER BY score LIMIT @limit OFFSET @offset`,
+      );
+      return this.readableRows((limit, offset) => stmt.all({ ...params, limit, offset }) as SearchHit[], fetchLimit, (h) => h.id, o.readable);
     };
     // Fuse BM25 rank with title overlap so a short note whose title matches beats a huge note that mentions everything.
     const fuse = (hits: SearchHit[]): SearchHit[] =>
@@ -507,18 +508,17 @@ export class VaultIndex {
     if (!terms.length) return [];
     const quoted = terms.map((t) => `"${t}"*`);
     const run = (match: string): SectionHit[] => {
-      const params: Record<string, unknown> = { match, limit };
+      const params: Record<string, unknown> = { match };
       const filter = this.buildFilter(o, params);
-      return this.db
-        .prepare(
-          `SELECT s.note_id, s.ord, s.heading,
-                  snippet(sections_fts, 3, '**', '**', ' ... ', 24) AS snippet,
-                  bm25(sections_fts, 0, 0, 3.0, 1.0) AS score
-           FROM sections_fts s JOIN notes n ON n.id = s.note_id
-           WHERE sections_fts MATCH @match ${filter}
-           ORDER BY score LIMIT @limit`,
-        )
-        .all(params) as SectionHit[];
+      const stmt = this.db.prepare(
+        `SELECT s.note_id, s.ord, s.heading,
+                snippet(sections_fts, 3, '**', '**', ' ... ', 24) AS snippet,
+                bm25(sections_fts, 0, 0, 3.0, 1.0) AS score
+         FROM sections_fts s JOIN notes n ON n.id = s.note_id
+         WHERE sections_fts MATCH @match ${filter}
+         ORDER BY score LIMIT @limit OFFSET @offset`,
+      );
+      return this.readableRows((n, offset) => stmt.all({ ...params, limit: n, offset }) as SectionHit[], limit, (h) => h.note_id, o.readable);
     };
     try {
       const strict = run(quoted.join(" AND "));
@@ -533,8 +533,11 @@ export class VaultIndex {
   }
 
   // ------------------------------------------------------------ hybrid ranking
-  /** Query terms plus alias expansions and spelling corrections (originals are kept alongside). */
-  private understand(q: string): { terms: string[]; corrections: string[] } {
+  /**
+   * Query terms plus alias expansions and spelling corrections (originals are kept alongside). A correction must be a
+   * word some note the caller may read holds: a word only private notes use must not show up as "spelling read as".
+   */
+  private understand(q: string, readable?: (n: NoteRow) => boolean): { terms: string[]; corrections: string[] } {
     const raw = queryTerms(q);
     const out = new Set<string>();
     const corrections: string[] = [];
@@ -543,7 +546,7 @@ export class VaultIndex {
       if (aliases[t]) for (const x of queryTerms(aliases[t])) out.add(x);
       out.add(t);
       const c = this.dense?.correct(t);
-      if (c) {
+      if (c && (!readable || this.wordReadable(c, readable))) {
         corrections.push(`${t}→${c}`);
         out.add(c);
       }
@@ -553,6 +556,18 @@ export class VaultIndex {
     return { terms: [...out], corrections };
   }
 
+  private wordReadable(word: string, readable: (n: NoteRow) => boolean): boolean {
+    try {
+      const rows = this.db.prepare("SELECT DISTINCT note_id FROM sections_fts2 WHERE sections_fts2 MATCH ?").all(`"${word.replace(/"/g, "")}"`) as { note_id: string }[];
+      return rows.some((r) => {
+        const n = this.get(r.note_id);
+        return !!n && readable(n);
+      });
+    } catch {
+      return false;
+    }
+  }
+
   private noteFilterOk(n: NoteRow | undefined, o: SearchOptions): n is NoteRow {
     if (!n) return false;
     if (o.project && (n.project ?? "").toLowerCase() !== o.project.toLowerCase()) return false;
@@ -560,22 +575,22 @@ export class VaultIndex {
     if (o.since && n.modified < o.since) return false;
     if (o.until && n.modified > o.until) return false;
     if (o.topic && !this.topicsOf(n.id).some((t) => t.toLowerCase() === o.topic!.toLowerCase())) return false;
+    if (o.readable && !o.readable(n)) return false;
     return true;
   }
 
   /** Section BM25 over the OR of all terms (title x4, heading x2, project/topics x1.5), honouring the note filters. */
   private bm25Sections(terms: string[], o: SearchOptions, limit: number): { key: string; note_id: string; ord: number }[] {
     if (!terms.length) return [];
-    const params: Record<string, unknown> = { match: terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR "), limit };
+    const params: Record<string, unknown> = { match: terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ") };
     const filter = this.buildFilter(o, params);
     try {
-      const rows = this.db
-        .prepare(
-          `SELECT s.note_id, s.ord, bm25(sections_fts2, 0, 0, 4.0, 2.0, 1.0, 1.5, 1.5) AS score
-           FROM sections_fts2 s JOIN notes n ON n.id = s.note_id
-           WHERE sections_fts2 MATCH @match ${filter} ORDER BY score LIMIT @limit`,
-        )
-        .all(params) as { note_id: string; ord: number }[];
+      const stmt = this.db.prepare(
+        `SELECT s.note_id, s.ord, bm25(sections_fts2, 0, 0, 4.0, 2.0, 1.0, 1.5, 1.5) AS score
+         FROM sections_fts2 s JOIN notes n ON n.id = s.note_id
+         WHERE sections_fts2 MATCH @match ${filter} ORDER BY score LIMIT @limit OFFSET @offset`,
+      );
+      const rows = this.readableRows((n, offset) => stmt.all({ ...params, limit: n, offset }) as { note_id: string; ord: number }[], limit, (r) => r.note_id, o.readable);
       return rows.map((r) => ({ key: `${r.note_id}#${r.ord}`, note_id: r.note_id, ord: r.ord }));
     } catch (e) {
       console.error(`[rank] bm25: ${(e as Error).message}`);
@@ -585,10 +600,39 @@ export class VaultIndex {
 
   /** Sections containing an ISO date verbatim: FTS5 splits 2026-09-24 into three weak tokens, so this list restores exact matches. */
   private dateHits(dates: string[], o: SearchOptions): { key: string; note_id: string; ord: number }[] {
-    const stmt = this.db.prepare("SELECT note_id, ord FROM sections WHERE instr(text, ?) > 0 LIMIT 40");
+    // Filtered before the cut of 40, so notes the caller may not read cannot take the places.
+    const stmt = this.db.prepare("SELECT note_id, ord FROM sections WHERE instr(text, ?) > 0 ORDER BY note_id, ord");
     const out: { key: string; note_id: string; ord: number }[] = [];
-    for (const d of dates) for (const r of stmt.all(d) as { note_id: string; ord: number }[]) if (this.noteFilterOk(this.get(r.note_id), o)) out.push({ key: `${r.note_id}#${r.ord}`, ...r });
+    for (const d of dates) {
+      let n = 0;
+      for (const r of stmt.all(d) as { note_id: string; ord: number }[]) {
+        if (n >= 40) break;
+        if (!this.noteFilterOk(this.get(r.note_id), o)) continue;
+        out.push({ key: `${r.note_id}#${r.ord}`, ...r });
+        n++;
+      }
+    }
     return out;
+  }
+
+  /**
+   * The first `want` rows of a ranked query whose notes the caller may read. A SQL LIMIT counts every note, so without
+   * this a vault with many private matches would push readable ones out of the list; pages are fetched until enough
+   * readable rows are found. Without a readable check this is one query.
+   */
+  private readableRows<T>(fetch: (limit: number, offset: number) => T[], want: number, noteOf: (r: T) => string, readable?: (n: NoteRow) => boolean): T[] {
+    if (!readable) return fetch(want, 0);
+    const out: T[] = [];
+    const page = Math.max(2 * want, 50);
+    for (let offset = 0; out.length < want; offset += page) {
+      const rows = fetch(page, offset);
+      for (const r of rows) {
+        const n = this.get(noteOf(r));
+        if (n && readable(n)) out.push(r);
+      }
+      if (rows.length < page) break;
+    }
+    return out.slice(0, want);
   }
 
   /**
@@ -600,18 +644,22 @@ export class VaultIndex {
     const t0 = Date.now();
     const rc = this.cfg.retrieval;
     const k = Math.min(Math.max(o.k ?? 10, 1), 50);
-    const u = this.understand(query);
+    const u = this.understand(query, o.readable);
     const dates = query.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
-    const lex = this.bm25Sections(u.terms, o, 40);
-    const exact = dates.length ? this.dateHits(dates, o) : [];
     const noteCache = new Map<string, NoteRow | undefined>();
     const noteOf = (id: string) => {
       if (!noteCache.has(id)) noteCache.set(id, this.get(id));
       return noteCache.get(id);
     };
+    // The SQL filters cover project/type/dates/topic; readability is checked while each list is filled, so notes the
+    // caller may not read never take a place in it (see readableRows).
+    const lex = this.bm25Sections(u.terms, o, 40);
+    const exact = dates.length ? this.dateHits(dates, o) : [];
     const modelsOk = this.dense ? await this.dense.ready() : false;
     const den = modelsOk
-      ? (await this.dense!.search(query, 40)).filter((h) => this.noteFilterOk(noteOf(h.note_id), o)).map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }))
+      ? (o.readable ? (await this.dense!.search(query, Infinity)).filter((h) => { const n = noteOf(h.note_id); return !!n && o.readable!(n); }).slice(0, 40) : await this.dense!.search(query, 40))
+          .filter((h) => this.noteFilterOk(noteOf(h.note_id), o))
+          .map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }))
       : [];
     // Note-level BM25 (title x4 over the whole body) as a fourth list, anchored on each note's first window:
     // a note whose title names the subject still competes when no single window carries every term.

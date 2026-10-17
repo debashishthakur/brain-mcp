@@ -54,9 +54,9 @@ export function buildContext(cfg: ResolvedConfig, index: VaultIndex, policy: Pol
   const readable = (n: NoteRow | undefined): n is NoteRow => !!n && policy.canRead(n, p);
 
   // Signal 1: section hits
-  const secHits: SectionHit[] = index.searchSections(question, { project: o.project, limit: c.candidateSections });
-  // Signal 2: note hits
-  const noteHits = index.search(question, { project: o.project, limit: c.candidateNotes });
+  const secHits: SectionHit[] = index.searchSections(question, { project: o.project, limit: c.candidateSections, readable: (n) => policy.canRead(n, p) });
+  // Signal 2: note hits. Unreadable notes are dropped here too, so they can neither rank nor seed the link bonus below.
+  const noteHits = index.search(question, { project: o.project, limit: c.candidateNotes, readable: (n) => policy.canRead(n, p) }).filter((h) => readable(noteOf(h.id)));
   const noteRank = new Map<string, number>();
   noteHits.forEach((h, i) => noteRank.set(h.id, i));
   // Signal 3: graph neighbourhood of the top note hits
@@ -186,7 +186,7 @@ export async function buildContextHybrid(cfg: ResolvedConfig, index: VaultIndex,
   const c = cfg.context;
   const budget = Math.max(2000, Math.min(o.budgetChars ?? c.budgetChars, 60000));
   const perNote = Math.max(1, Math.min(o.maxSectionsPerNote ?? c.maxSectionsPerNote, 6));
-  const r = await index.rankSections(question, { project: o.project, k: 24 });
+  const r = await index.rankSections(question, { project: o.project, k: 24, readable: (n) => policy.canRead(n, p) });
   if (r.coverage === "lexical") return { ...buildContext(cfg, index, policy, p, question, o), coverage: "lexical" };
   const readable = r.sections.filter((s) => policy.canRead(s.note, p));
   if (r.coverage === "none" || !readable.length) {

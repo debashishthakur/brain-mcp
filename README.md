@@ -204,6 +204,7 @@ node scripts/verify-memory.mjs   # brain_remember dedupe and replacements, brain
 node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
+node scripts/verify-policy.mjs   # notes a connection may not read never rank, appear or get named in a links line
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
