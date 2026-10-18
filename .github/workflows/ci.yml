@@ -53,6 +53,8 @@ jobs:
         run: node scripts/verify-oauth.mjs
       - name: Hybrid retrieval (models, refusal, spelling, identifiers)
         run: node scripts/verify-hybrid.mjs
+      - name: Ranker's last step (empty shortlist, notes without sections, agreeOverride)
+        run: node scripts/verify-ranking.mjs
       - name: Private notes stay out of ranking, search, context and links
         run: node scripts/verify-policy.mjs
       - name: Retrieval eval, keyword vs hybrid

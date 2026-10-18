@@ -75,7 +75,7 @@ flowchart LR
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
    - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`), always including each list's first pick, so fusion cannot bury a hit only one search found. When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
-   - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
+   - **Decide:** if even the best passage scores below the reranker's floor, answer "nothing relevant"; otherwise return the strong hits and at least the five best, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
 4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. A fact can replace an earlier one, expire, or start at a given date; `brain_identity` serves only the facts true now, and `brain_facts` keeps the history. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
 
@@ -204,6 +204,7 @@ node scripts/verify-memory.mjs   # brain_remember dedupe and replacements, brain
 node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
+node scripts/verify-ranking.mjs  # the ranker's last step with stand-in models: empty shortlist, notes without sections, agreeOverride
 node scripts/verify-policy.mjs   # notes a connection may not read never rank, appear or get named in a links line
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
@@ -243,14 +244,14 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Keyword only | 42% | 100% | 100% | 2 ms |
 | Hybrid (default) | **83%** | 100% | 100% | about 1.1 s |
 
-**`eval-hybrid.mjs`**, 26 harder questions, 11 of them needing two notes:
+**`eval-hybrid.mjs`**, 29 harder questions, 11 of them needing two notes and 7 off-topic:
 
 | Ranker | Right note first | Right note in top 5 | Off-topic questions refused | Two-note questions with both notes in the context pack |
 | --- | --- | --- | --- | --- |
-| Keyword only | 77% | 100% | 2 of 4 | – |
-| Hybrid (default) | 73% | 82% | **3 of 4** | 7 of 11 |
+| Keyword only | 77% | 100% | 2 of 7 | – |
+| Hybrid (default) | 73% | 86% | **6 of 7** | 9 of 11 |
 
-Hybrid search refuses questions the vault cannot answer, but it also refuses some real ones and trims away the second note of a two-note answer. The script follows every note an answer needs through the ranker. On this vault all of them reach the reranker's shortlist; four are then trimmed and two are lost to refusals. Its weak spot is paraphrase: "why is the bird audio never sent to an online service" is still refused. Calibrating the "nothing relevant" floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10).
+The script follows every note an answer needs through the ranker. On this vault all of them reach the reranker's shortlist; what used to lose them was the last step, which trimmed the second note of a two-note answer and refused some real questions. Two settings fix most of that: a "nothing relevant" floor calibrated per reranker model (`bge-reranker-base` 0.02, `ms-marco-MiniLM` 0.001; the two score on very different scales), and keeping at least the five best hits (`minKeep`). Before them the same set scored 82% in the top 5 and 7 of 11. A third, `agreeOverride`, is off: answering instead of refusing when keyword and meaning search put the same section first rescues the money-tracker paraphrase here, but also answers off-topic questions that share one rare word with a note, such as "python snake species in india". The off-topic question still answered, "which of Ines's projects runs on Kubernetes", is a near miss: the vault holds related notes, so no floor can tell it apart from a real question. Paraphrase is still the weak spot ([issue #3](https://github.com/debashishthakur/brain-mcp/issues/3)), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10).
 
 To score your own vault, write cases with the notes each answer needs (`required`) and the sentences that prove it (`evidence`: a list of groups, each holding alternative spans of which one must be in the context pack), then run `node scripts/eval-hybrid.mjs --config <your config> --cases <your cases>`. `--set key=value` tries another setting (`--set rerankN=8`), `--sweep key=a,b,c` compares several in one run, `--repeat 2` checks that two runs agree exactly, and `--json` keeps every result.
 
@@ -356,7 +357,7 @@ The index derives a `facts` table from these lines whenever the file changes, an
 | `privateProjects`, `privatePaths` | Project names and globs that need the `brain:private` scope. |
 | `context.*` | `brain_context` budget, per-section cap, sections per note and candidate pool sizes. |
 | `identity.*` | Profile note, memory and skills projects, focus window and size caps. |
-| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"), `keepRatio`, `earlyExit`, and `aliases` for your own shorthands. Every field is optional. |
+| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `firstPicks` (also rerank each search's own best hit), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"; calibrated per reranker model unless you set it), `goodAt` (coverage "good" from here up), `keepRatio`, `minKeep` (always keep this many hits), `agreeOverride` (off; on, no refusal when keyword and meaning search put the same section first), `earlyExit`, and `aliases` for your own shorthands. Every field is optional. |
 | `writableDirs` | Folders the write, edit, move and delete tools may change. Default: the capture folder and `Notes`. |
 | `http.*` | Host, port and path for HTTP modes. The shipped config uses `127.0.0.1:3737/mcp`. |
 | `auth.*` | Mode, public URL, token lifetimes, lockout policy and default scopes for OAuth. |
@@ -515,7 +516,7 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 
 Each of these is an open issue with a suggested approach and a definition of done:
 
-- **When should retrieval abstain?** Hybrid search refuses all off-topic questions, but also some real ones. Calibrating the floor is open. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
+- **When should retrieval abstain?** The floor is now calibrated per reranker and refuses plainly off-topic questions. Near misses, where the vault holds related notes but not the answer, still score like real questions: telling them apart needs a check that a passage actually answers the question. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
 - **Which reranker gives the best accuracy per millisecond on a CPU?** A model six times faster finds the right note in 58% of everyday questions instead of 75%. ([#10](https://github.com/debashishthakur/brain-mcp/issues/10))
 - **Can the graph a vault already has replace an LLM-built one** for multi-hop questions? ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
 - **How should AI memory notice that a fact changed?** The memory file now records replacements and expiry, and `brain_facts` answers what was true when. A change the caller does not name is only caught by word overlap within one category; catching it by meaning is open. ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))

@@ -16,6 +16,8 @@ console.log("instructions mention coverage:", /coverage "none"/.test(client.getI
 
 const CHECKS = [
   ["brain_search", { query: "best pizza in rome", limit: 5 }, /Coverage: none/],
+  // Shares one rare word ("species") with a single note, so keyword and meaning search agree on it: still refused.
+  ["brain_search", { query: "python snake species in india", limit: 5 }, /Coverage: none/],
   ["brain_search", { query: "which projects use PostgreSQL", limit: 5 }, /Concepts\/PostgreSQL\.md|Use PostgreSQL for the ledger/],
   // Asserts the spelling correction only: whether this query clears the relevance floor is borderline
   // and differs across CPUs (issue #3), so the eval scripts score it instead of failing CI.

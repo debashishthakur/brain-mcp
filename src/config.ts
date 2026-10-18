@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DENSE_DEFAULTS, type DenseConfig } from "./vault/dense.js";
+import { DENSE_DEFAULTS, floorFor, type DenseConfig } from "./vault/dense.js";
 
 export interface BrainConfig {
   /** Hybrid retrieval (BM25 + local embeddings + reranker). Every field is optional; see DENSE_DEFAULTS. */
@@ -115,6 +115,8 @@ export function loadConfig(overridePath?: string): ResolvedConfig {
   if (process.env.BRAIN_MCP_HOST) raw.http.host = process.env.BRAIN_MCP_HOST;
   if (process.env.BRAIN_MCP_PORT) raw.http.port = Number(process.env.BRAIN_MCP_PORT);
   const retrieval: DenseConfig = { ...DENSE_DEFAULTS, ...(raw.retrieval ?? {}), aliases: { ...DENSE_DEFAULTS.aliases, ...(raw.retrieval?.aliases ?? {}) } };
+  // The floor depends on the reranker's scale: use the model's calibrated one unless the config sets its own.
+  if (raw.retrieval?.floor === undefined) retrieval.floor = floorFor(retrieval.rerankModel);
   if (process.env.BRAIN_MCP_HYBRID === "0") retrieval.hybrid = false; // emergency switch back to keyword-only ranking
   return { ...raw, auth, retrieval, rootDir: ROOT_DIR, configPath: cfgPath, vaultDir, dataDir, modelsDir, logDir };
 }

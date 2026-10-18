@@ -32,6 +32,7 @@ import { loadConfig } from "../dist/config.js";
 import { VaultIndex } from "../dist/vault/index.js";
 import { buildContextHybrid, packSections } from "../dist/context.js";
 import { ALL_SCOPES, Policy } from "../dist/policy.js";
+import { floorFor } from "../dist/vault/dense.js";
 
 // ---------------------------------------------------------------- options
 const argv = process.argv.slice(2);
@@ -114,6 +115,10 @@ for (const s of opt.set) {
   const eq = s.indexOf("=");
   setPath(cfg, s.slice(0, eq), parseValue(s.slice(eq + 1)));
 }
+// A --set rerankModel takes that model's calibrated floor, as the config loader would, unless a floor is set too.
+const rawCfg = JSON.parse(fs.readFileSync(cfg.configPath, "utf8"));
+const setKeys = opt.set.map((s) => retrievalKey(s.slice(0, s.indexOf("="))));
+if (setKeys.includes("rerankModel") && !setKeys.includes("floor") && rawCfg.retrieval?.floor === undefined) cfg.retrieval.floor = floorFor(cfg.retrieval.rerankModel);
 const index = new VaultIndex(cfg);
 // The owner's view: every scope, so only denyPaths notes are hidden, as brain_search and brain_context would.
 const policy = new Policy(cfg);
@@ -128,7 +133,7 @@ if (index.dense) {
 const nSections = index.db.prepare("SELECT COUNT(*) c FROM sections").get().c;
 const rc = cfg.retrieval;
 const settings = () =>
-  `rerank ${rc.rerankModel.split("/").pop()} · rerankN ${rc.rerankN} · floor ${rc.floor} · keepRatio ${rc.keepRatio} · blend ${rc.blend} · earlyExit ${rc.earlyExit} · firstPicks ${rc.firstPicks}`;
+  `rerank ${rc.rerankModel.split("/").pop()} · rerankN ${rc.rerankN} · floor ${rc.floor} · goodAt ${rc.goodAt} · keepRatio ${rc.keepRatio} · minKeep ${rc.minKeep} · agreeOverride ${rc.agreeOverride} · blend ${rc.blend} · earlyExit ${rc.earlyExit} · firstPicks ${rc.firstPicks}`;
 console.log(`vault: ${path.basename(cfg.vaultDir)} · ${ri.indexed} notes · ${nSections} sections · ${CASES.length} cases${opt.split !== "all" ? ` (${opt.split} split)` : ""}`);
 console.log(`settings: ${settings()}`);
 

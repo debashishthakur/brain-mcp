@@ -24,5 +24,8 @@
   { "cls": "offtopic", "q": "best pizza in rome", "gold": [] },
   { "cls": "offtopic", "q": "recipe for chicken biryani", "gold": [] },
   { "cls": "offtopic", "q": "who won the football world cup", "gold": [] },
-  { "cls": "offtopic", "q": "which of Ines's projects runs on Kubernetes", "gold": [] }
+  { "cls": "offtopic", "q": "which of Ines's projects runs on Kubernetes", "gold": [] },
+  { "cls": "offtopic", "q": "python snake species in india", "gold": [] },
+  { "cls": "offtopic", "q": "what is the population of lisbon", "gold": [] },
+  { "cls": "offtopic", "q": "best marathon training plan for beginners", "gold": [] }
 ]

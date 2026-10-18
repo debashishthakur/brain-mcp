@@ -703,12 +703,14 @@ export class VaultIndex {
       : [];
     // Note-level BM25 (title x4 over the whole body) as a fourth list, anchored on each note's first window:
     // a note whose title names the subject still competes when no single window carries every term.
+    // A note with no section (an empty file, or frontmatter only) has nothing to return, so its title alone must not
+    // reach the reranker and win the coverage label.
+    const secStmt = this.db.prepare("SELECT heading, text FROM sections WHERE note_id = ? AND ord = ?");
     const noteList = this.search(u.terms.join(" "), { ...o, limit: 15 })
-      .filter((h) => this.noteFilterOk(noteOf(h.id), o))
+      .filter((h) => this.noteFilterOk(noteOf(h.id), o) && secStmt.get(h.id, 0))
       .map((h) => ({ key: `${h.id}#0`, note_id: h.id, ord: 0 }));
     const lists = [lex, den, exact, noteList].filter((l) => l.length);
     const fused = rrf(lists);
-    const secStmt = this.db.prepare("SELECT heading, text FROM sections WHERE note_id = ? AND ord = ?");
     const materialise = (item: { note_id: string; ord: number }, score: number, rprob: number, why: string[]): RankedSection | null => {
       const note = noteOf(item.note_id);
       const sec = secStmt.get(item.note_id, item.ord) as { heading: string; text: string } | undefined;
@@ -765,6 +767,7 @@ export class VaultIndex {
         if (f) cands.push(f);
       }
     }
+    if (!cands.length) return done([], "none", false);
     // The shortcut needs the agreed section inside the reranked head. The note-level list can lift other notes'
     // first windows above it (a long note such as the memory file competes there through its first window only),
     // and a head without it would gate a well-answered query to "none". With firstPicks off this is 0.4.0's rule,
@@ -807,16 +810,26 @@ export class VaultIndex {
       cut: "floor",
     }));
     if (debug) debug.pool = pool;
-    if (topR < rc.floor) return done([], "none", agree);
+    // With agreeOverride, keyword and meaning search putting the same section first answers "thin" with that note
+    // instead of refusing: evidence the reranker missed, though one rare shared word makes both searches agree too.
+    const searchAgrees = rc.agreeOverride && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key;
+    if (topR < rc.floor && !searchAgrees) return done([], "none", agree);
+    const overridden = topR < rc.floor;
     const scored = cands.map((c, i) => ({ c, i, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
     scored.sort((a, b) => b.score - a.score);
     const top = scored[0].score;
     const out: RankedSection[] = [];
-    // Sorted best first, so once one entry is trimmed or past k, every later one is too.
+    // Sorted best first, so once one entry is trimmed or past k, every later one is too. The best `minKeep` are
+    // never trimmed: the second note of a two-note answer often scores far below the first.
     let stop: PoolCut | null = null;
     for (const s of scored) {
       pool[s.i].score = s.score;
-      if (!stop && s.score < Math.max(0.02, rc.keepRatio * top)) stop = "trim";
+      // An overridden answer vouches for the agreed note only; everything else scored under the floor.
+      if (overridden && s.c.item.note_id !== lex[0].note_id) {
+        pool[s.i].cut = "floor";
+        continue;
+      }
+      if (!stop && out.length >= rc.minKeep && s.score < Math.max(0.02, rc.keepRatio * top)) stop = "trim";
       if (!stop && out.length >= k) stop = "limit";
       if (stop) {
         pool[s.i].cut = stop;
@@ -829,7 +842,7 @@ export class VaultIndex {
         pool[s.i].cut = "kept";
       }
     }
-    return done(out, topR >= 0.3 ? "good" : "thin", agree);
+    return done(out, !overridden && topR >= rc.goodAt ? "good" : "thin", agree);
   }
 
   /** Note-level hybrid search: a note scores as its best section, which also supplies the snippet. */
