@@ -74,7 +74,7 @@ flowchart LR
    - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
-   - **Follow links** (off by default, `retrieval.graph`): a section of a note linked with the top hits can take a reranker place from the weakest fused entry it beats, and the reranker reads the sentence that links them. A section the last step would trim is kept anyway when it is linked with a kept hit.
+   - **Follow links** (off by default, `retrieval.graph`): a section of a note linked with the top hits (hub and topic pages included, with a boost when several top hits link to the same note) can take a reranker place from the weakest fused entry it beats, and the reranker reads the sentence that links them. A section the last step would trim is kept anyway when it is linked with a kept hit.
    - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`), always including each list's first pick, so fusion cannot bury a hit only one search found. When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
    - **Decide:** if even the best passage scores below the reranker's floor, answer "nothing relevant"; otherwise return the strong hits and at least the five best, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.

@@ -895,7 +895,8 @@ export class VaultIndex {
       const sel = selectGraphPicks({
         seeds,
         neighbours: (id) => this.graph.neighbours(id),
-        isStructural: (id) => this.graph.isStructural(id),
+        // Hub and topic pages may take a place too: for "what connects A and B" the topic page is the answer.
+        isStructural: () => false,
         access,
         listed: new Set(cands.map((c) => c.item.note_id)),
         bestWindow: (id) => bestOf.get(id),

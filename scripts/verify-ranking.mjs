@@ -217,11 +217,11 @@ gfake.cos = baseCos();
 
 // 5. structural notes: a hub or concept page may seed, but is never a linked section or a partner
 // The Restore concept page is linked from the top hit in a sentence and fits the question, but no list finds it.
-gfake.cos = { ...baseCos(), "Concepts/Restore.md": 0.45 };
+gfake.cos = { ...baseCos(), [T]: 0.01, "Concepts/Restore.md": 0.45 };
 const st = await grun({}, { ...ON, swapWeight: 100, linksPerSeed: 10 });
 check(
-  "a concept page linked from a top hit is never a linked section",
-  st.debug.graph.candidates.some((c) => c.note === "Concepts/Restore.md" && c.status === "structural") && !st.debug.pool.some((p) => p.src === "graph" && /^(Hubs|Concepts)\//.test(p.key)),
+  "a concept page linked from a top hit can take a reranker place like any linked note",
+  st.debug.pool.some((p) => p.src === "graph" && p.key.startsWith("Concepts/Restore.md")),
   JSON.stringify(st.debug.graph.candidates.filter((c) => /^(Hubs|Concepts)\//.test(c.note))),
 );
 // The hub is trimmed while a note it lists is kept: it would be that note's partner, were it not structural.
