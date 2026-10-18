@@ -71,15 +71,15 @@ Appends one durable fact to the owner's memory file. It joins `brain_identity` i
 - `force`: store as is. Near-duplicates of current facts are refused, and a fact that may change a current one in the same category is held back until you pass `replaces` or `force`.
 
 ### brain_capture
-Writes a new note into `Captures/` with frontmatter that links it into the graph.
+Writes a new note into `Captures/` with frontmatter that links it into the graph. The reply lists existing notes the body names without linking (unlinked mentions), so you can link the ones that matter with `brain_edit`.
 - `title`*: a specific noun phrase, not a file name.
-- `body`*: Markdown. Link concepts inline with `[[Concept]]` on first mention.
+- `body`*: Markdown. Link related notes inside the sentence that says how they relate, e.g. "The restore steps are in `[[Restore the ledger database]]`"; a bare list of links carries little weight.
 - `kind`: note, idea, decision, plan, log or research.
 - `project`: the project hub it belongs to.
 - `topics`: concept names, e.g. `["OAuth", "RAG"]`.
 
 ### brain_write
-Creates a note at a chosen path under `Notes/` or `Captures/`, or replaces one with `overwrite`.
+Creates a note at a chosen path under `Notes/` or `Captures/`, or replaces one with `overwrite`. Like `brain_capture`, the reply lists unlinked mentions.
 - `path`*: e.g. `"Notes/Harbor Ledger.md"`.
 - `title`*, `body`* (Markdown without frontmatter or the `#` title).
 - `type`: note, hub, moc, guide, runbook, plan, decision, ... A `hub` groups every note whose `project` matches its title.
@@ -91,6 +91,7 @@ Changes part of a note under `Notes/` or `Captures/`. Give exactly one of:
 - `section` + `content`: replaces everything under that heading, up to the next heading of the same or higher level.
 - `append`: Markdown added at the end.
 - Plus `note`*: note id, title or `[[wikilink]]`.
+- The reply lists unlinked mentions in the new text only.
 
 ### brain_move
 Moves or renames a note within `Notes/` and `Captures/`, for example to promote a capture into `Notes/`. Refuses to overwrite, and reports links that stop resolving.

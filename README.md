@@ -117,7 +117,7 @@ Everything runs on your machine: the models are downloaded once into `data/model
 | `brain_project` | Briefing on a project: description, latest progress, decisions, recent changes and notes grouped by type. With no argument it lists projects. |
 | `brain_graph` | Links out, backlinks grouped by project, and notes that share topics. |
 | `brain_recent` | Notes modified in the last N days, newest first. |
-| `brain_capture` | Writes a new note with graph-ready frontmatter into the capture folder. |
+| `brain_capture` | Writes a new note with graph-ready frontmatter into the capture folder. Like `brain_write` and `brain_edit`, its reply lists existing notes the text names without linking, so the caller can link them in the sentence that says how they relate. |
 | `brain_remember` | Appends a fact to the memory file; it joins `brain_identity` straight away. `replaces` names facts it makes outdated, `subject` + `attribute` replace the previous fact with the same pair on their own, and `valid_from` / `valid_until` bound when it holds. Near duplicates of current facts are refused (token Jaccard ≥ 0.6 or containment ≥ 0.85); a partial overlap in the same category is held back until the caller passes `replaces` or `force=true`. |
 | `brain_facts` | Captured facts and when each was true: the current ones, the ones true at an `as_of` date, or every version with what replaced it (`history`). Filters by `subject`, `category` and words. |
 | `brain_write` | Creates a note at a chosen path in a writable folder (`Notes/` and the capture folder by default), or replaces one with `overwrite=true`. A `hub` note groups every note whose `project` matches its title. |
@@ -207,6 +207,7 @@ node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers
 node scripts/verify-ranking.mjs  # the ranker's last step with stand-in models: empty shortlist, notes without sections, agreeOverride
 node scripts/verify-policy.mjs   # notes a connection may not read never rank, appear or get named in a links line
 node scripts/verify-graph.mjs    # link kinds, every way of writing a link target, duplicate names, the window each link sits in
+node scripts/verify-mentions.mjs # write replies name existing notes mentioned without a link, never private or already-linked ones
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove

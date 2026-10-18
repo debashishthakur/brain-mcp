@@ -57,6 +57,7 @@ The vault belongs to the owner and every connected AI client reads it, so a care
 - **Duplicates.** `brain_remember` refuses near-duplicates of current facts. That is usually right; tell the user it's already known.
 - **Changes.** When a fact replaces one the identity bundle shows, pass `replaces` with the old fact's id (the stamp in its heading, e.g. `"2026-09-22 18:21"`); the old one stays in the file as history and leaves the bundle. If `brain_remember` holds a fact back because it may change a current one, decide: `replaces` if the old one is now wrong, `force: true` if both stay true. For something temporary ("I'm travelling until Friday"), pass `valid_until`.
 - **No session trivia.** "We fixed a typo in line 40" isn't a memory. "Always run the migration dry-run first" is.
+- **Link in sentences.** Link a related note inside the sentence that says how it relates ("The restore steps are in [[Restore the ledger database]]"), not in a list at the end. Retrieval follows links written this way and gives bare link lists little weight. When a write reply lists unlinked mentions, link the ones whose sentence states a relation with `brain_edit` (at most three); leave passing mentions alone.
 - **Report what you wrote**: the note id or the stored fact, so the owner knows what changed.
 
 ## 5. Privacy

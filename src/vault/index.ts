@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
-import { linkWindows, parseNoteFile, splitSections, stripConnections, toId, type ParsedNote } from "./parse.js";
-import { LinkGraph } from "./graph.js";
+import { codeLines, extractLinks, linkWindows, parseNoteFile, splitSections, stripConnections, stripLink, toId, type ParsedNote } from "./parse.js";
+import { LinkGraph, STRUCTURAL_TYPES } from "./graph.js";
 import { DenseIndex } from "./dense.js";
 import { FactStore } from "../facts.js";
 import type { ResolvedConfig } from "../config.js";
@@ -30,6 +30,16 @@ export interface SearchHit {
   modified: string;
   snippet: string;
   score: number;
+}
+
+/** An existing note a text names without linking it. */
+export interface Mention {
+  id: string;
+  title: string;
+  /** The name as found: the title or one of its aliases. */
+  name: string;
+  /** The sentence around the first mention. */
+  snippet: string;
 }
 
 export interface SearchOptions {
@@ -998,5 +1008,83 @@ export class VaultIndex {
 
   projectNames(): string[] {
     return (this.db.prepare("SELECT DISTINCT project FROM notes WHERE project IS NOT NULL ORDER BY project").all() as { project: string }[]).map((r) => r.project);
+  }
+
+  /**
+   * Existing notes a text names without linking: titles and aliases of notes the caller may read, the first mention
+   * of each, at most `max`, in the order they appear. Left out: hubs and concept pages, the memory file, `selfId`, and
+   * any note the text already links. A name needs two or more words (any case), or one word of five or more letters
+   * written with the title's own capitals that occurs in at most 5% of sections, so common words stay quiet. Code,
+   * links, URLs and headings are not searched. Write tools return these so the caller can link them in a sentence.
+   */
+  unlinkedMentions(written: string, selfId: string | null, canRead: (n: NoteRow) => boolean, max = 3): Mention[] {
+    // Blank out what must not match, keeping positions so snippets come from the original text.
+    const text = written.replace(/\r\n/g, "\n");
+    const blank = (s: string) => s.replace(/[^\n]/g, " ");
+    const lines = text.split("\n");
+    const code = codeLines(lines);
+    let masked = lines.map((l, i) => (code[i] ? blank(l) : l)).join("\n");
+    masked = masked.replace(/`[^`\n]*`/g, blank).replace(/!?\[\[[^\]\n]*\]\]/g, blank).replace(/\]\([^)\n]*\)/g, blank).replace(/https?:\/\/\S+/g, blank);
+    masked = masked.replace(/^#{1,6}\s.*$/gm, blank);
+    const lower = masked.toLowerCase();
+    const linked = new Set<string>();
+    for (const o of extractLinks(text, {})) {
+      const id = this.graph.resolve(selfId ?? "", o.target);
+      if (id) linked.add(id);
+    }
+    const nSections = (this.db.prepare("SELECT COUNT(*) c FROM sections").get() as { c: number }).c || 1;
+    // A word is common when other notes use it a lot: the named note's own sections and the note being written don't count.
+    const dfStmt = this.db.prepare("SELECT COUNT(*) c FROM sections_fts2 WHERE sections_fts2 MATCH ? AND note_id NOT IN (?, ?)");
+    const rare = (word: string, noteId: string) => {
+      try {
+        return (dfStmt.get(`"${word.replace(/"/g, "")}"`, noteId, selfId ?? "") as { c: number }).c <= 0.05 * nSections;
+      } catch {
+        return false;
+      }
+    };
+    const names: { id: string; title: string; name: string }[] = [];
+    const rows = this.db.prepare("SELECT id, title, type, project, visibility, frontmatter FROM notes ORDER BY id").all() as NoteRow[];
+    for (const r of rows) {
+      if (r.id === selfId || this.isMemoryFile(r.id) || STRUCTURAL_TYPES.has(r.type) || linked.has(r.id) || !canRead(r)) continue;
+      let aliases: string[] = [];
+      try {
+        const fm = JSON.parse(r.frontmatter) as Record<string, unknown>;
+        aliases = (Array.isArray(fm.aliases) ? fm.aliases : typeof fm.aliases === "string" ? fm.aliases.split(",") : []).map((a) => stripLink(a)).filter(Boolean);
+      } catch {}
+      for (const name of new Set([r.title, ...aliases].map((s) => s.trim()).filter(Boolean))) names.push({ id: r.id, title: r.title, name });
+    }
+    // Longest names first, so "Harbor Ledger progress" wins over "Harbor Ledger" where both fit.
+    names.sort((a, b) => b.name.length - a.name.length || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const found: (Mention & { at: number })[] = [];
+    const taken: [number, number][] = [];
+    const seen = new Set<string>();
+    for (const n of names) {
+      if (seen.has(n.id)) continue;
+      const multi = /\s/.test(n.name);
+      if (!multi && (n.name.length < 5 || !/^\p{L}/u.test(n.name))) continue;
+      if (!lower.includes(n.name.toLowerCase())) continue;
+      const esc = n.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      const re = new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, multi ? "iu" : "u");
+      const m = re.exec(masked);
+      if (!m) continue;
+      const start = m.index;
+      const end = start + m[0].length;
+      if (taken.some(([s, e]) => start < e && end > s)) continue;
+      if (!multi && !rare(n.name, n.id)) continue;
+      taken.push([start, end]);
+      seen.add(n.id);
+      // The sentence holding the mention, from the original text.
+      const before = text.slice(0, start);
+      const from = Math.max(before.lastIndexOf("\n"), before.search(/[.!?]\s[^.!?]*$/) + 1, 0);
+      const afterIdx = text.slice(end).search(/[.!?\n]/);
+      const to = afterIdx < 0 ? text.length : end + afterIdx + 1;
+      let snippet = text.slice(from, to).replace(/\s+/g, " ").trim();
+      if (snippet.length > 160) snippet = `${snippet.slice(0, 157).trimEnd()}…`;
+      found.push({ id: n.id, title: n.title, name: m[0], snippet, at: start });
+    }
+    return found
+      .sort((a, b) => a.at - b.at)
+      .slice(0, max)
+      .map(({ at, ...m }) => m);
   }
 }

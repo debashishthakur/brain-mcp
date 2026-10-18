@@ -363,15 +363,26 @@ export function createBrainServer(d: Deps): McpServer {
     return abs;
   };
 
+  /** Existing notes the new text names without linking, as a hint appended to a write tool's reply ("" if none). */
+  const mentionHint = (written: string, selfId: string, p: Principal): string => {
+    const found = index.unlinkedMentions(written, selfId, (n) => policy.canRead(n, p));
+    if (!found.length) return "";
+    const lines = found.map((m) => `- "${m.name}" → [[${m.title}]]: "${policy.redact(m.snippet).text}"`);
+    return `\n\nUnlinked mentions of existing notes. Where the sentence says how they relate, link the first mention there with brain_edit (old_text = that sentence); leave passing mentions alone:\n${lines.join("\n")}`;
+  };
+
   server.registerTool(
     "brain_capture",
     {
       title: "Save a durable note",
       description:
-        "Write a new note into the vault's capture folder with graph-ready frontmatter. Use for plans, decisions, ideas, meeting notes, or session logs the owner wants to keep. Not for one-line facts (use brain_remember).",
+        "Write a new note into the vault's capture folder with graph-ready frontmatter. Use for plans, decisions, ideas, meeting notes, or session logs the owner wants to keep. Not for one-line facts (use brain_remember). The reply lists existing notes the body names without linking.",
       inputSchema: {
         title: z.string().min(3).max(140).describe("Specific noun phrase, not a filename"),
-        body: z.string().min(1).describe("Markdown body. Link concepts inline with [[Concept]] on first mention."),
+        body: z
+          .string()
+          .min(1)
+          .describe("Markdown body. Link related notes inside the sentence that says how they relate, e.g. 'The restore steps are in [[Restore the ledger database]]'; a bare list of links carries little weight."),
         kind: z.enum(["note", "idea", "decision", "plan", "log", "research"]).optional().default("note"),
         project: z.string().optional().describe("Project hub name this belongs to, e.g. 'Website Redesign'"),
         topics: z.array(z.string()).max(8).optional().describe("Concept names, e.g. ['OAuth', 'RAG']"),
@@ -405,7 +416,7 @@ export function createBrainServer(d: Deps): McpServer {
         ];
         const content = fmLines.join("\n") + `# ${args.title}\n\n${args.body.trim()}\n`;
         writeCaptured(rel, content);
-        return { result: text(`Saved \`${rel}\`.${warn}`), notes: [rel] };
+        return { result: text(`Saved \`${rel}\`.${warn}${mentionHint(args.body, rel, p)}`), notes: [rel] };
       });
     },
   );
@@ -659,11 +670,11 @@ export function createBrainServer(d: Deps): McpServer {
     {
       title: "Create or replace a hand-written note",
       description:
-        "Create a note at a path you choose under Notes/ or Captures/, or replace one there with overwrite=true. Use it for hubs, guides and runbooks maintained by hand. Unlike brain_capture you set the type, including 'hub': a hub groups every note whose frontmatter project matches its title. Generated notes elsewhere in the vault cannot be written.",
+        "Create a note at a path you choose under Notes/ or Captures/, or replace one there with overwrite=true. Use it for hubs, guides and runbooks maintained by hand. Unlike brain_capture you set the type, including 'hub': a hub groups every note whose frontmatter project matches its title. Generated notes elsewhere in the vault cannot be written. The reply lists existing notes the body names without linking.",
       inputSchema: {
         path: z.string().min(4).max(240).describe("Vault path, e.g. 'Notes/Harbor Ledger.md'"),
         title: z.string().min(1).max(140),
-        body: z.string().min(1).describe("Markdown body, without frontmatter or the # title heading"),
+        body: z.string().min(1).describe("Markdown body, without frontmatter or the # title heading. Link related notes inside the sentence that says how they relate."),
         type: z.string().regex(/^[a-z][a-z-]{1,23}$/).optional().default("note").describe("note, hub, moc, guide, runbook, plan, decision, ..."),
         project: z.string().optional().describe("Hub this note belongs to, e.g. 'Harbor Ledger'"),
         topics: z.array(z.string()).max(8).optional().describe("Concept names, e.g. ['OAuth', 'RAG']"),
@@ -708,7 +719,7 @@ export function createBrainServer(d: Deps): McpServer {
           if (twin) notes.push(`Another hub with this title exists at \`${twin.id}\`; remove one of them.`);
         }
         if (args.project && !projectHub) notes.push(`No hub named "${args.project}" exists yet; the project link stays unresolved until one does.`);
-        return { result: text(`${exists ? "Replaced" : "Created"} \`${rel}\`.${notes.length ? "\n\n" + notes.join("\n") : ""}`), notes: [rel] };
+        return { result: text(`${exists ? "Replaced" : "Created"} \`${rel}\`.${notes.length ? "\n\n" + notes.join("\n") : ""}${mentionHint(args.body, rel, p)}`), notes: [rel] };
       });
     },
   );
@@ -718,7 +729,7 @@ export function createBrainServer(d: Deps): McpServer {
     {
       title: "Edit part of a hand-written note",
       description:
-        "Change part of a note under Notes/ or Captures/ without rewriting it. Give exactly one of: old_text + new_text (old_text must occur exactly once; new_text may be empty), section + content (replaces everything under that heading up to the next heading of the same or higher level; the heading itself stays), or append. Generated notes and the memory file cannot be edited.",
+        "Change part of a note under Notes/ or Captures/ without rewriting it. Give exactly one of: old_text + new_text (old_text must occur exactly once; new_text may be empty), section + content (replaces everything under that heading up to the next heading of the same or higher level; the heading itself stays), or append. Generated notes and the memory file cannot be edited. The reply lists existing notes the new text names without linking.",
       inputSchema: {
         note: z.string().min(1).describe("Note id (vault path), title or [[wikilink]]"),
         old_text: z.string().min(1).optional().describe("Exact text to replace; must occur exactly once"),
@@ -755,7 +766,9 @@ export function createBrainServer(d: Deps): McpServer {
         out = out.replace(/^modified: .*$/m, `modified: ${today()}`);
         fs.writeFileSync(abs, out.replace(/\n/g, eol), "utf8");
         index.upsertFile(abs);
-        return { result: text(`Edited \`${rel}\`.`), notes: [rel] };
+        // Only the new text: mentions that were already there are not reported again on every edit.
+        const added = args.new_text ?? args.content ?? args.append ?? "";
+        return { result: text(`Edited \`${rel}\`.${mentionHint(added, rel, p)}`), notes: [rel] };
       });
     },
   );
