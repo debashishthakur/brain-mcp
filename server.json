@@ -8,12 +8,12 @@
     "url": "https://github.com/debashishthakur/brain-mcp",
     "source": "github"
   },
-  "version": "0.4.0",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "debawho-brain-mcp",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "transport": {
         "type": "stdio"
       },
