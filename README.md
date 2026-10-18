@@ -259,6 +259,24 @@ The script follows every note an answer needs through the ranker. On this vault 
 
 To score your own vault, write cases with the notes each answer needs (`required`) and the sentences that prove it (`evidence`: a list of groups, each holding alternative spans of which one must be in the context pack), then run `node scripts/eval-hybrid.mjs --config <your config> --cases <your cases>`. `--set key=value` tries another setting (`--set rerankN=8`), `--sweep key=a,b,c` compares several in one run, `--repeat 2` checks that two runs agree exactly, and `--json` keeps every result.
 
+## Graph visualizer
+
+<div align="center">
+  <img src="docs/images/graph-visualizer.jpg" alt="The graph visualizer on a real vault: the Model Context Protocol note hovered, its strongest links lit in green, unconnected notes faded, and its bonds listed with the sentence behind each" width="100%" />
+</div>
+
+See your vault the way search sees it. `npm run graph` exports the link graph, and [`visualizer/`](visualizer) draws it in an Obsidian-style 2D view or in 3D:
+
+- Notes are coloured by meaning (their embeddings), so topics shade into each other.
+- Line thickness is the bond strength the ranker uses when it follows links.
+- Hovering a note lights its strongest neighbours in green and fades the rest.
+- Clicking a note lists its bonds with the sentence that makes each link.
+
+```bash
+npm run graph
+cd visualizer && python3 -m http.server 4750 --bind 127.0.0.1   # open http://127.0.0.1:4750/
+```
+
 ## Use your own vault
 
 `npx debawho-brain-mcp init`, or `npm run setup` in a clone, does this for you. To do it by hand, copy `brain.config.json` to `brain.config.local.json` (or `~/.brain-mcp/config.json` for the npm package) and change what differs:
@@ -554,7 +572,8 @@ brain-mcp/
 │   ├── vault/            parsing notes, the SQLite index, hybrid ranking
 │   │   └── dense.ts      local embeddings and the reranker
 │   └── auth/             OAuth 2.1 server, login page, TOTP, token store
-├── scripts/              setup, smoke test, verification scripts, retrieval eval
+├── scripts/              setup, smoke test, verification scripts, retrieval eval, graph export
+├── visualizer/           the graph visualizer: one HTML page and its vendored libraries
 ├── templates/            the starter vault init and npm run setup create
 ├── example-vault/        a fictional vault used by every script
 ├── deploy/               Linux and Windows setup, Cloudflare Tunnel template

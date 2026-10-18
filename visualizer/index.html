@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Brain Graph</title>
+<style>
+  :root {
+    --bg: #121317; --panel: rgba(30, 32, 38, 0.9); --line: #33363f; --fg: #dcddde; --muted: #999ba3; --accent: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #graph { position: fixed; inset: 0; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(8px); padding: 14px 16px; }
+  #controls { top: 16px; left: 16px; width: 280px; }
+  #details { top: 16px; right: 16px; width: 340px; max-height: calc(100% - 32px); overflow: auto; display: none; }
+  h1 { font-size: 15px; margin: 0 0 2px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
+  input[type=search], select { width: 100%; background: #16171a; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; font: inherit; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; background: #16171a; border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
+  .seg button { background: none; border: 0; color: var(--muted); font: inherit; padding: 5px 0; border-radius: 4px; cursor: pointer; }
+  .seg button.on { background: #2d2f37; color: var(--fg); }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 13px; }
+  .row input { accent-color: var(--accent); }
+  .legend { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  .grad { height: 8px; border-radius: 4px; margin: 6px 0 4px; background: linear-gradient(90deg, hsl(0 60% 62%), hsl(60 60% 62%), hsl(120 60% 62%), hsl(180 60% 62%), hsl(240 60% 62%), hsl(300 60% 62%), hsl(360 60% 62%)); }
+  .bonds { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .bonds i { display: inline-block; width: 36px; background: #9aa0ab; border-radius: 2px; }
+  #details h2 { font-size: 16px; margin: 0 0 4px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+  .nb { display: grid; grid-template-columns: 10px 1fr 64px; gap: 4px 10px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); cursor: pointer; }
+  .nb:hover .name { color: var(--accent); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 6px; border-radius: 3px; background: #2a2c33; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); }
+  .why { grid-column: 2 / 4; color: var(--muted); font-size: 12px; }
+  .close { float: right; background: none; border: 0; color: var(--muted); font-size: 18px; cursor: pointer; }
+  .scene-tooltip, .graph-tooltip { background: none !important; padding: 0 !important; color: var(--fg) !important; font: 12px ui-sans-serif, system-ui, sans-serif !important; text-shadow: 0 1px 3px #000; }
+  #drop { position: fixed; inset: 0; display: none; place-items: center; text-align: center; color: var(--muted); }
+  #drop div { border: 1px dashed var(--line); border-radius: 16px; padding: 40px 48px; background: var(--panel); }
+  #drop button { margin-top: 12px; background: var(--accent); color: #17121f; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  @media (max-width: 760px) {
+    #controls { left: 16px; right: 16px; width: auto; }
+    #details { top: auto; bottom: 16px; left: 16px; right: 16px; width: auto; max-height: 45%; }
+  }
+</style>
+</head>
+<body>
+<div id="graph"></div>
+
+<div id="controls" class="panel">
+  <h1>Brain graph</h1>
+  <div class="meta" id="meta">Loading graph.json…</div>
+  <div class="seg" role="group" aria-label="View">
+    <button id="view2d" class="on">Graph</button>
+    <button id="view3d">3D</button>
+  </div>
+  <label for="search">Find a note</label>
+  <input id="search" type="search" list="titles" placeholder="Type a title" />
+  <datalist id="titles"></datalist>
+  <label for="colorBy">Colour by</label>
+  <select id="colorBy">
+    <option value="meaning">Meaning (each note)</option>
+    <option value="project">Project (by its overall meaning)</option>
+  </select>
+  <label for="minStrength">Hide bonds weaker than <b id="minVal">0.15</b></label>
+  <input id="minStrength" type="range" min="0" max="1" step="0.01" value="0.15" />
+  <div class="row"><input id="hubs" type="checkbox" checked /><span>Show hub and concept pages</span></div>
+  <div class="row"><input id="meaningPull" type="checkbox" checked /><span>Pull similar meanings together</span></div>
+  <div class="legend">
+    Colour: similar meaning, similar colour
+    <div class="grad"></div>
+    <div class="bonds"><i style="height:1px"></i>weak bond <i style="height:4px"></i>strong bond</div>
+    <div style="margin-top:8px">Hover a note to light up its links. Click it for its bonds, their strength and the sentence behind each. Zoom in to see names.</div>
+  </div>
+</div>
+
+<div id="details" class="panel"></div>
+
+<div id="drop"><div>
+  <div>Couldn't load <code>graph.json</code> from this folder.</div>
+  <div>Drop the file here, or pick it.</div>
+  <button id="pick">Choose graph.json</button>
+  <input id="file" type="file" accept=".json,application/json" hidden />
+</div></div>
+
+<script src="vendor/force-graph.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const KIND = {
+  sentence: "in a sentence", embed: "embedded", list_explained: "list item with a note", heading: "in a heading", table: "in a table",
+  short: "short mention", list_bare: "bare list item",
+};
+const kindText = (k) => KIND[k] ?? (k.startsWith("fm:") ? `frontmatter: ${k.slice(3)}` : k);
+const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+
+// ---- colour: the first two meaning components pick the hue, the third the lightness
+function semHsl(sem, sat = 1) {
+  if (!sem) return [225, 6, 62];
+  const hue = ((Math.atan2(sem[1], sem[0]) * 180) / Math.PI + 360) % 360;
+  const r = Math.min(1, Math.hypot(sem[0], sem[1]));
+  return [hue, (30 + 40 * r) * sat, 60 + 8 * sem[2]];
+}
+// Comma syntax: three.js (3D view) does not parse the space-separated form with alpha.
+const hsl = ([h, s, l], dl = 0, a = 1) => {
+  const body = `${h.toFixed(0)}, ${s.toFixed(0)}%, ${Math.max(10, Math.min(92, l + dl)).toFixed(0)}%`;
+  return a < 1 ? `hsla(${body}, ${a})` : `hsl(${body})`;
+};
+
+let raw, data, graph, selected = null, hovered = null, dragged = null, fitted = false;
+const state = { view: (new URLSearchParams(location.search).get("view") ?? store.get("brain-graph-view")) === "3d" ? "3d" : "2d", colorBy: "meaning", min: 0.15, hubs: true, pull: true };
+const nodeColour = new Map();
+
+function computeColours() {
+  const projectSem = new Map();
+  if (state.colorBy === "project") {
+    const acc = new Map();
+    for (const n of raw.nodes) if (n.project && n.sem) {
+      const a = acc.get(n.project) ?? [0, 0, 0, 0];
+      a[0] += n.sem[0]; a[1] += n.sem[1]; a[2] += n.sem[2]; a[3]++;
+      acc.set(n.project, a);
+    }
+    for (const [p, a] of acc) projectSem.set(p, [a[0] / a[3], a[1] / a[3], a[2] / a[3]].map((x) => x * 1.6));
+  }
+  for (const n of raw.nodes) {
+    const sem = state.colorBy === "project" && n.project && projectSem.has(n.project) ? projectSem.get(n.project) : n.sem;
+    nodeColour.set(n.id, semHsl(sem, n.structural ? 0.3 : 1));
+  }
+}
+
+const idOf = (x) => (typeof x === "object" ? x.id : x);
+const nodeVisible = (n) => state.hubs || !n.structural;
+const linkVisible = (l) => l.strength >= state.min && nodeVisible(l.source) && nodeVisible(l.target);
+// The note in focus: the hovered one, else the selected one. Every note within three links glows with the product
+// of the bond strengths along its strongest path, shrinking with each ring: strongly bonded neighbours glow most,
+// the next rings less, and everything further out fades nearly away.
+// A dragged note keeps the focus: the pointer leaves the dot while dragging, which would drop the hover.
+const focus = () => dragged ?? hovered ?? selected;
+const RINGS = 3;
+const RING_STEP = [1, 0.95, 0.74, 0.79]; // cumulative: 0.95, 0.70, 0.55 for a path of full-strength bonds
+const FAR_ALPHA = 0.025;
+// The glow is always green, whatever the note's own colour.
+const GREEN = [142, 72, 52];
+const bondFactor = (s) => 0.35 + 0.65 * Math.min(1, s / 0.6);
+let hops = new Map(), glow = new Map();
+function computeHops() {
+  hops = new Map();
+  glow = new Map();
+  const f = focus();
+  if (!f || !data) return;
+  const adj = new Map();
+  for (const l of data.links) if (linkVisible(l)) {
+    const a = idOf(l.source), b = idOf(l.target);
+    if (!adj.has(a)) adj.set(a, []);
+    if (!adj.has(b)) adj.set(b, []);
+    adj.get(a).push([b, l.strength]);
+    adj.get(b).push([a, l.strength]);
+  }
+  hops.set(f.id, 0);
+  glow.set(f.id, 1);
+  let ring = [f.id];
+  for (let d = 1; d <= RINGS && ring.length; d++) {
+    const next = [];
+    for (const id of ring) for (const [nb, s] of adj.get(id) ?? []) {
+      if (hops.has(nb) && hops.get(nb) < d) continue;
+      if (!hops.has(nb)) { hops.set(nb, d); next.push(nb); }
+      glow.set(nb, Math.max(glow.get(nb) ?? 0, glow.get(id) * bondFactor(s) * RING_STEP[d]));
+    }
+    ring = next;
+  }
+}
+const hopOf = (id) => hops.get(id) ?? Infinity;
+const glowOf = (id) => glow.get(id) ?? 0;
+// A link is lit if it runs between rings inside the lit area (not along the last ring); it glows like its weaker end.
+const linkLevel = (l) => {
+  const a = hopOf(idOf(l.source)), b = hopOf(idOf(l.target));
+  const hi = Math.max(a, b), lo = Math.min(a, b);
+  return hi <= RINGS && lo < RINGS && hi - lo <= 1 ? Math.max(1, hi) : Infinity;
+};
+const linkGlow = (l) => (linkLevel(l) === Infinity ? 0 : Math.min(glowOf(idOf(l.source)), glowOf(idOf(l.target))));
+const touchesFocus = (l) => !!focus() && linkLevel(l) === 1 && Math.min(hopOf(idOf(l.source)), hopOf(idOf(l.target))) === 0;
+
+// Size: well-linked notes are much bigger (radius grows with links^0.4).
+const REL = 3.6;
+const nodeVal = (n) => 2 + 1.2 * Math.pow(n.degree, 0.8);
+const radius = (n) => Math.sqrt(nodeVal(n)) * REL;
+const linkWidth = (l) => (state.view === "2d" ? 0.25 : 0.15) + (state.view === "2d" ? 1.6 : 2.4) * Math.min(1.2, l.strength) * (touchesFocus(l) ? 1.4 : 1);
+
+function hslToRgb([h, s, l]) {
+  s /= 100; l /= 100;
+  const k = (n) => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+  const f = (n) => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))));
+  return [f(0), f(8), f(4)];
+}
+const GREY = [150, 155, 168];
+const GREEN_RGB = hslToRgb([142, 80, 58]);
+
+// 2D animation: every value eases toward its target each frame (time constant ~140 ms), so hovering in and out,
+// the glow, the fading and the names all move smoothly.
+let lastT = 0;
+function animate(scale) {
+  if (!data) return;
+  const now = performance.now();
+  const dt = lastT ? Math.min(100, now - lastT) : 16;
+  lastT = now;
+  const k = 1 - Math.exp(-dt / 140);
+  const ease = (cur, target) => cur + (target - cur) * k;
+  const f = focus();
+  for (const n of data.nodes) {
+    const on = hops.has(n.id);
+    const g = glowOf(n.id);
+    n.__a = ease(n.__a ?? 1, f ? (on ? FAR_ALPHA + (1 - FAR_ALPHA) * Math.pow(g, 1.3) : FAR_ALPHA) : 1);
+    n.__g = ease(n.__g ?? 0, f && on ? g : 0);
+    n.__r = ease(n.__r ?? 0, f && f.id === n.id ? 1 : 0);
+    // Names: only the focused note's, else they appear once a dot is big on screen (hubs first, the rest as you zoom).
+    const tl = f ? (f.id === n.id ? 1 : 0) : Math.max(0, Math.min(1, (radius(n) * scale - 18) / 6));
+    n.__l = ease(n.__l ?? tl, tl);
+  }
+  for (const l of data.links) {
+    const lg = f ? linkGlow(l) : 0;
+    l.__m = ease(l.__m ?? 0, lg > 0 ? 1 : 0);
+    l.__a = ease(l.__a ?? 0, f ? (lg > 0 ? 0.02 + 0.9 * Math.pow(lg, 1.3) : 0.012) : 0.1 + 0.3 * Math.min(1, l.strength));
+  }
+}
+
+// 2D lines. Obsidian style at rest: quiet grey, stronger bonds a little brighter. In focus: green, by glow.
+function linkColour(l) {
+  const m = l.__m ?? 0;
+  const c = GREY.map((g, i) => Math.round(g + (GREEN_RGB[i] - g) * m));
+  // Same strength as the 3D lines.
+  return `rgba(${c[0]},${c[1]},${c[2]},${Math.min(1, 1.4 * (l.__a ?? 0.2)).toFixed(3)})`;
+}
+
+// ---- 3D: the same look and easing as 2D. Each note is a sphere plus a small green glow sprite, each line has its
+// own material, and a frame loop eases them all. three.js is loaded here and handed to 3d-force-graph through
+// window.THREE (its bundle uses it when present), so both share one copy.
+let T = null, glowTex = null, sphereGeo = null;
+async function load3d() {
+  if (!window.THREE) window.THREE = await import("./vendor/three.module.min.js");
+  if (!window.ForceGraph3D) await loadScript("vendor/3d-force-graph.min.js");
+  T = window.THREE;
+  if (glowTex) return;
+  // A smooth, high-resolution falloff; drawn white and tinted green by the sprite material.
+  const c = document.createElement("canvas");
+  c.width = c.height = 256;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  [[0, 1], [0.45, 0.75], [0.6, 0.38], [0.72, 0.16], [0.84, 0.05], [1, 0]].forEach(([t, a]) => g.addColorStop(t, `rgba(255,255,255,${a})`));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 256);
+  glowTex = new T.CanvasTexture(c);
+  glowTex.colorSpace = T.SRGBColorSpace;
+  sphereGeo = new T.SphereGeometry(1, 32, 20);
+}
+const radius3 = (n) => Math.cbrt(nodeVal(n)) * 3.2;
+const glowSize3 = (n, g) => 2 * radius3(n) * (1.3 + 0.45 * g);
+function nodeObject3d(n) {
+  const group = new T.Group();
+  n.__mat = new T.MeshLambertMaterial({ color: hsl(nodeColour.get(n.id)), transparent: true });
+  const ball = new T.Mesh(sphereGeo, n.__mat);
+  ball.scale.setScalar(radius3(n));
+  n.__glow = new T.Sprite(new T.SpriteMaterial({ map: glowTex, color: hsl(GREEN, 14), transparent: true, opacity: 0, blending: T.AdditiveBlending, depthWrite: false }));
+  n.__glow.raycast = () => {}; // hover and drag follow the sphere, not the glow around it
+  n.__glow.visible = false;
+  // Glow drawn first, then the ball over it: the green shows only as a rim around the sphere, not across it.
+  n.__glow.renderOrder = 0;
+  ball.renderOrder = 1;
+  group.add(n.__glow, ball);
+  return group;
+}
+const linkMaterial3d = (l) => (l.__mat ??= new T.MeshLambertMaterial({ color: "rgb(150,155,168)", transparent: true, opacity: 0.3, depthWrite: false }));
+function tick3d(g) {
+  if (graph !== g) return;
+  animate(0);
+  for (const n of data.nodes) {
+    if (!n.__mat) continue;
+    const [h, s, l] = nodeColour.get(n.id);
+    const gl = n.__g ?? 0;
+    n.__mat.color.setHSL(h / 360, s / 100, Math.min(0.92, (l + 10 * gl) / 100), T.SRGBColorSpace);
+    n.__mat.opacity = n.__a ?? 1;
+    n.__mat.depthWrite = (n.__a ?? 1) > 0.5; // faded notes must not hide lit ones behind them
+    n.__glow.visible = gl > 0.01;
+    n.__glow.material.opacity = 0.85 * Math.pow(gl, 1.5); // falls off fast: strong links shine, weak ones barely
+    n.__glow.scale.setScalar(glowSize3(n, gl));
+  }
+  for (const l of data.links) {
+    if (!l.__mat) continue;
+    const m = l.__m ?? 0;
+    const c = GREY.map((v, i) => (v + (GREEN_RGB[i] - v) * m) / 255);
+    l.__mat.color.setRGB(c[0], c[1], c[2], T.SRGBColorSpace);
+    l.__mat.opacity = Math.min(1, 1.4 * (l.__a ?? 0.2));
+  }
+  requestAnimationFrame(() => tick3d(g));
+}
+
+
+// 2D, Obsidian style: a plain dot with a soft glow when lit, a ring on the focused note, and its name.
+// All alphas come from animate(), so changes ease in and out.
+function drawNode(n, ctx, scale) {
+  const r = radius(n);
+  const c = nodeColour.get(n.id);
+  const g = n.__g ?? 0;
+  ctx.globalAlpha = n.__a ?? 1;
+  ctx.beginPath();
+  ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
+  ctx.fillStyle = hsl(c, 10 * g);
+  // Glow: the canvas's own Gaussian shadow, a thin green rim hugging the dot. shadowBlur ignores the zoom
+  // transform, so the rim keeps the same on-screen size (3-9 px, by glow) at any zoom.
+  if (g > 0.02) {
+    ctx.shadowColor = hsl(GREEN, 12, 0.85 * g);
+    ctx.shadowBlur = (3 + 6 * g) * (window.devicePixelRatio || 1);
+  }
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = "transparent";
+  if ((n.__r ?? 0) > 0.01) {
+    ctx.globalAlpha = n.__r;
+    ctx.lineWidth = 2 / scale;
+    ctx.strokeStyle = hsl(GREEN, 24);
+    ctx.stroke();
+  }
+  const la = n.__l ?? 0;
+  if (la > 0.02) {
+    const size = 12 / scale;
+    ctx.font = `${size}px ui-sans-serif, system-ui, -apple-system, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.globalAlpha = la;
+    ctx.fillStyle = "#dcddde";
+    const t = n.title.length > 34 ? n.title.slice(0, 33) + "…" : n.title;
+    ctx.fillText(t, n.x, n.y + r + 3 / scale);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// A gentle pull of each note toward the place its meaning points to, so topics form regions.
+function meaningForce(dims) {
+  let nodes = [];
+  const R = dims === 3 ? 260 : 320, k = 0.035;
+  const force = (alpha) => {
+    for (const n of nodes) if (n.sem) {
+      n.vx += (n.sem[0] * R - n.x) * k * alpha;
+      n.vy += (n.sem[1] * R - n.y) * k * alpha;
+      if (dims === 3) n.vz += (n.sem[2] * R - n.z) * k * alpha;
+    }
+  };
+  force.initialize = (ns) => (nodes = ns);
+  return force;
+}
+
+function refresh() {
+  if (!graph) return;
+  computeHops();
+  graph
+    .nodeVisibility((n) => nodeVisible(n))
+    .linkVisibility((l) => linkVisible(l))
+    .linkWidth((l) => linkWidth(l))
+    .linkDirectionalParticles((l) => (touchesFocus(l) ? 2 : 0));
+  // 2D colours lines each frame through this accessor; 3D eases its own materials in tick3d().
+  if (state.view === "2d") graph.linkColor((l) => linkColour(l));
+}
+
+function frameNode(n) {
+  if (state.view === "2d") {
+    graph.centerAt(n.x, n.y, 800);
+    graph.zoom(Math.max(graph.zoom(), 2.2), 800);
+  } else {
+    const d = 90, r = 1 + d / Math.max(1, Math.hypot(n.x, n.y, n.z));
+    graph.cameraPosition({ x: n.x * r, y: n.y * r, z: n.z * r }, n, 1000);
+  }
+}
+
+function select(n) {
+  selected = n;
+  refresh();
+  const box = $("details");
+  if (!n) return void (box.style.display = "none");
+  frameNode(n);
+  const rows = data.links
+    .filter((l) => idOf(l.source) === n.id || idOf(l.target) === n.id)
+    .map((l) => ({ l, other: idOf(l.source) === n.id ? l.target : l.source, out: idOf(l.source) === n.id }))
+    .sort((a, b) => b.l.strength - a.l.strength);
+  const tags = [n.type, n.project, ...n.topics].filter(Boolean).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
+  box.innerHTML = `<button class="close" aria-label="Close">×</button><h2>${esc(n.title)}</h2>
+    <div class="meta">${esc(n.id)} · modified ${esc(n.modified)}</div><div class="tags">${tags}</div>
+    <div class="meta">${rows.length} bonds, strongest first</div>
+    ${rows.map((x, i) => `<div class="nb" data-i="${i}"><span class="dot" style="background:${hsl(nodeColour.get(x.other.id))}"></span>
+      <span class="name" title="${esc(x.other.title)}">${x.out ? "→" : "←"} ${esc(x.other.title)}</span>
+      <span class="bar" title="${x.l.strength.toFixed(2)}"><span style="width:${Math.min(100, (x.l.strength / 1.2) * 100).toFixed(0)}%"></span></span>
+      <span class="why">${x.l.strength.toFixed(2)} · ${esc(kindText(x.l.kind))}${x.l.sentence ? ` · “${esc(x.l.sentence)}”` : ""}</span></div>`).join("")}`;
+  box.style.display = "block";
+  box.querySelector(".close").onclick = () => select(null);
+  box.querySelectorAll(".nb").forEach((el) => (el.onclick = () => select(rows[+el.dataset.i].other)));
+}
+
+const loadScript = (src) => new Promise((ok, fail) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = fail; document.head.append(s); });
+
+// Each view gets fresh copies of the nodes and links, so one layout never leaks into the other.
+async function build() {
+  if (graph) { graph._destructor(); $("graph").innerHTML = ""; graph = null; }
+  if (state.view === "3d") {
+    try {
+      await load3d();
+    } catch {
+      // Module imports need http; opened as a file, stay in the 2D view.
+      $("meta").textContent = "3D needs the page served over http (see README)";
+      state.view = "2d";
+      $("view2d").classList.add("on");
+      $("view3d").classList.remove("on");
+    }
+  }
+  const dims = state.view === "3d" ? 3 : 2;
+  const R = dims === 3 ? 260 : 320;
+  const nodes = raw.nodes.map((n) => ({ ...n, ...(n.sem ? { x: n.sem[0] * R, y: n.sem[1] * R, ...(dims === 3 ? { z: n.sem[2] * R } : {}) } : {}) }));
+  data = { nodes, links: raw.links.map((l) => ({ ...l })) };
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  if (selected) selected = byId.get(selected.id) ?? null;
+  hovered = null;
+  dragged = null;
+  fitted = false;
+
+  const el = $("graph");
+  document.body.style.background = "#121317";
+  const g = dims === 3 ? new ForceGraph3D(el, { controlType: "orbit" }) : new ForceGraph(el);
+  g.width(innerWidth).height(innerHeight)
+    .graphData(data)
+    .nodeId("id")
+    .nodeVal(nodeVal)
+    .nodeRelSize(REL)
+    // No hover boxes: 2D draws the hovered name on the canvas; 3D shows the bare name (see .scene-tooltip).
+    .nodeLabel(dims === 3 ? (n) => esc(n.title) : null)
+    .linkLabel(null)
+    .linkDirectionalParticleWidth(dims === 3 ? 1.6 : 2)
+    .linkDirectionalParticleColor(() => hsl(GREEN, 14))
+    .linkDirectionalParticleSpeed(0.006)
+    .onNodeHover((n) => { hovered = n || null; el.style.cursor = n ? "pointer" : ""; refresh(); })
+    .onNodeDrag((n) => { if (dragged !== n) { dragged = n; refresh(); } })
+    .onNodeDragEnd(() => { dragged = null; refresh(); })
+    .onNodeClick((n) => select(n))
+    .onBackgroundClick(() => select(null))
+    .cooldownTime(6000)
+    .onEngineStop(() => { if (!fitted) { fitted = true; g.zoomToFit(800, 60); } });
+  if (dims === 3) {
+    g.backgroundColor("#121317").showNavInfo(false).nodeThreeObject(nodeObject3d).linkMaterial(linkMaterial3d);
+    requestAnimationFrame(() => tick3d(g));
+    // Start back far enough to see every note: the meaning layout spans about ±R, and a big vault spreads further
+    // (the library's own default, 170 x sqrt(notes)). The auto-fit refines it once the layout settles.
+    g.cameraPosition({ x: 0, y: 0, z: Math.max(R * 2.8, 170 * Math.sqrt(nodes.length)) });
+  } else {
+    g.backgroundColor("#121317").nodeCanvasObject(drawNode).autoPauseRedraw(false).onRenderFramePre((ctx, scale) => animate(scale));
+    g.d3Force("charge").strength(-90);
+  }
+  // Weak bonds pull less, so the strong ones shape the layout (base: d3's 1 / smaller degree).
+  g.d3Force("link")
+    .distance((l) => 30 + 90 / (1 + 3 * l.strength))
+    .strength((l) => (0.25 + 0.75 * Math.min(1, l.strength)) / Math.max(1, Math.min(l.source.degree, l.target.degree)));
+  g.d3Force("meaning", state.pull ? meaningForce(dims) : null);
+  graph = g;
+  refresh();
+  setTimeout(() => { if (!fitted && graph === g) { fitted = true; g.zoomToFit(800, 60); } }, 3500);
+  if (selected) select(selected);
+}
+
+function setView(v) {
+  state.view = v;
+  store.set("brain-graph-view", v);
+  $("view2d").classList.toggle("on", v === "2d");
+  $("view3d").classList.toggle("on", v === "3d");
+  if (raw) build();
+}
+
+function start(json) {
+  raw = json;
+  $("drop").style.display = "none";
+  $("minStrength").max = Math.max(...raw.links.map((l) => l.strength), 1).toFixed(2);
+  $("meta").textContent = `${raw.nodes.length} notes · ${raw.links.length} bonds · exported ${new Date(raw.generated).toLocaleString()}${raw.includesPrivate ? " · includes private" : ""}`;
+  $("titles").innerHTML = raw.nodes.map((n) => `<option value="${esc(n.title)}"></option>`).join("");
+  computeColours();
+  setView(state.view);
+}
+
+$("view2d").onclick = () => state.view !== "2d" && setView("2d");
+$("view3d").onclick = () => state.view !== "3d" && setView("3d");
+$("colorBy").onchange = (e) => { state.colorBy = e.target.value; computeColours(); refresh(); if (selected) select(selected); };
+$("minStrength").oninput = (e) => { state.min = +e.target.value; $("minVal").textContent = state.min.toFixed(2); refresh(); };
+$("hubs").onchange = (e) => { state.hubs = e.target.checked; refresh(); };
+$("meaningPull").onchange = (e) => {
+  state.pull = e.target.checked;
+  graph.d3Force("meaning", state.pull ? meaningForce(state.view === "3d" ? 3 : 2) : null);
+  graph.d3ReheatSimulation();
+};
+$("search").onchange = (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  const n = data?.nodes.find((x) => x.title.toLowerCase() === q) ?? data?.nodes.find((x) => x.title.toLowerCase().includes(q));
+  if (n) select(n);
+};
+
+// ---- loading: fetch works over http; when opened as a file, fall back to picking or dropping graph.json
+const readFile = (f) => f.text().then((t) => start(JSON.parse(t)));
+$("pick").onclick = () => $("file").click();
+$("file").onchange = (e) => e.target.files[0] && readFile(e.target.files[0]);
+addEventListener("dragover", (e) => e.preventDefault());
+addEventListener("drop", (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) readFile(f); });
+addEventListener("resize", () => graph && graph.width(innerWidth).height(innerHeight));
+fetch("graph.json").then((r) => (r.ok ? r.json() : Promise.reject())).then(start).catch(() => {
+  $("meta").textContent = "No graph loaded";
+  $("drop").style.display = "grid";
+});
+</script>
+</body>
+</html>
