@@ -2,7 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
-import { parseNoteFile, splitSections, stripConnections, toId, type ParsedNote } from "./parse.js";
+import { CODE_SPAN, codeLines, extractLinks, linkWindows, parseNoteFile, splitSections, stripConnections, stripLink, toId, type ParsedNote } from "./parse.js";
+import { clampGraph, LinkGraph, STRUCTURAL_TYPES } from "./graph.js";
+import { fairSwap, graphPrefix, linkedPartners, protectedKeys, selectGraphPicks, TOP_FIXED, type Access, type CandTrace, type GraphPick, type Seed } from "./graph-select.js";
 import { DenseIndex } from "./dense.js";
 import { FactStore } from "../facts.js";
 import type { ResolvedConfig } from "../config.js";
@@ -31,6 +33,16 @@ export interface SearchHit {
   score: number;
 }
 
+/** An existing note a text names without linking it. */
+export interface Mention {
+  id: string;
+  title: string;
+  /** The name as found: the title or one of its aliases. */
+  name: string;
+  /** The sentence around the first mention. */
+  snippet: string;
+}
+
 export interface SearchOptions {
   project?: string;
   type?: string;
@@ -38,6 +50,8 @@ export interface SearchOptions {
   since?: string; // YYYY-MM-DD
   until?: string;
   limit?: number;
+  /** Notes the caller may read. Ranking drops the rest before fusion, so they never take a reranker slot or decide coverage. */
+  readable?: (n: NoteRow) => boolean;
 }
 
 const SCHEMA = `
@@ -81,6 +95,17 @@ CREATE TABLE IF NOT EXISTS links (
   PRIMARY KEY (from_id, target)
 );
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
+CREATE TABLE IF NOT EXISTS edges (
+  from_id TEXT NOT NULL,
+  pos INTEGER NOT NULL,
+  from_ord INTEGER,
+  kind TEXT NOT NULL,
+  fm_key TEXT,
+  target TEXT NOT NULL,
+  target_heading TEXT,
+  ctx TEXT,
+  PRIMARY KEY (from_id, pos)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
   note_id UNINDEXED,
   title,
@@ -142,6 +167,70 @@ export interface RankedSection {
   why: string[];
 }
 
+/** Counts for the audit log and the evals: list sizes, fused candidates, how many reached and passed the reranker. */
+export interface RankStats {
+  lists: { lex: number; den: number; exact: number; note: number };
+  fused: number;
+  /** Sections handed to the reranker stage (or kept, on the keyword-only path). */
+  pool: number;
+  /** Pairs the cross-encoder actually scored. */
+  reranked: number;
+  /** Best reranker probability; null when the reranker did not run. */
+  topProb: number | null;
+  /** With retrieval.graph on: what the link graph added (counts only). */
+  graph?: GraphStats;
+}
+
+export interface GraphStats {
+  /** The graph step ran (not on the early-exit shortcut). */
+  ran: boolean;
+  seeds: number;
+  /** Linked sections worth a place. */
+  candidates: number;
+  /** Linked sections given a reranker place, and the fused entries they replaced. */
+  admitted: number;
+  displaced: number;
+  /** Trimmed sections kept as a kept hit's link partner. */
+  partners: number;
+  /** Best reranker probability among linked sections. */
+  topProb: number | null;
+  ms: number;
+}
+
+/** Why a pooled section did or did not reach the result: kept, refused by the floor, trimmed by keepRatio, or past k. */
+export type PoolCut = "kept" | "floor" | "trim" | "limit";
+
+export interface PoolEntry {
+  key: string;
+  /** head: inside the top `rerankN` of the fused list · first: a list's first pick added below it · graph: a linked section */
+  src: "head" | "first" | "graph";
+  /** 1-based position in the fused list. */
+  fusedRank: number;
+  reranked: boolean;
+  prob: number | null;
+  score: number | null;
+  cut: PoolCut;
+  /** For a linked section: the seed it was reached from and the link. */
+  graph?: { seed: string; dir: "out" | "in"; kind: string; strength: number; fit: number; score: number; prefixed: boolean };
+  /** Kept as the link partner of this kept note. */
+  partnerOf?: string;
+}
+
+/** The ranker's working state for one query, returned only when asked for (`debug: true`). */
+export interface RankDebug {
+  lists: { lex: string[]; den: string[]; exact: string[]; note: string[] };
+  /** Fused order, best first (at most 200). */
+  fused: { key: string; score: number }[];
+  pool: PoolEntry[];
+  /** With retrieval.graph on: the seeds, every linked note considered and what became of it, places given, partners. */
+  graph?: {
+    seeds: { note: string; key: string; score: number }[];
+    candidates: CandTrace[];
+    displaced: { key: string; fusedRank: number; by: string }[];
+    partners: { key: string; anchor: string; strength: number; kind: string }[];
+  };
+}
+
 export interface RankResult {
   sections: RankedSection[];
   /** good: confident hit · thin: weak best hit, answer with a caveat · none: the vault is silent · lexical: models unavailable, keyword ranking only */
@@ -150,12 +239,15 @@ export interface RankResult {
   terms: string[];
   earlyExit: boolean;
   ms: number;
+  stats: RankStats;
+  debug?: RankDebug;
 }
 
 export interface HybridSearchResult {
   hits: SearchHit[];
   coverage: RankResult["coverage"];
   corrections: string[];
+  stats: RankStats;
 }
 
 /** Reciprocal rank fusion over ranked lists keyed by section. */
@@ -208,6 +300,8 @@ export class VaultIndex {
   readonly dense: DenseIndex | null;
   /** Facts from the memory file with their validity windows, rebuilt whenever that file is indexed. */
   readonly facts: FactStore;
+  /** Link occurrences resolved to notes and weighted, rebuilt lazily after any change. */
+  readonly graph: LinkGraph;
   private readonly memoryId: string;
   private watcher: FSWatcher | null = null;
   private pending = new Map<string, NodeJS.Timeout>();
@@ -218,6 +312,7 @@ export class VaultIndex {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
     this.dense = cfg.retrieval.hybrid ? new DenseIndex(this.db, cfg.modelsDir, cfg.retrieval) : null;
+    this.graph = new LinkGraph(this.db, cfg.retrieval);
     this.memoryId = cfg.memoryFile.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
     this.facts = new FactStore(this.db);
     // An index built before the facts table existed already holds the memory file: derive the table from it now.
@@ -246,7 +341,9 @@ export class VaultIndex {
   }
 
   private *walk(dir: string): Generator<string> {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    // Sorted by byte order: row order decides exact ties in BM25, and readdir order differs between filesystems.
+    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
       const abs = path.join(dir, ent.name);
       if (this.isIgnored(abs)) continue;
       if (ent.isDirectory()) yield* this.walk(abs);
@@ -304,6 +401,7 @@ export class VaultIndex {
     db.prepare("DELETE FROM note_topics WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM note_tags WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM links WHERE from_id = ?").run(n.id);
+    db.prepare("DELETE FROM edges WHERE from_id = ?").run(n.id);
     db.prepare("DELETE FROM sections WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(n.id);
     db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(n.id);
@@ -344,14 +442,20 @@ export class VaultIndex {
     // sections_fts2 carries the note title, project and topics on every window so a title match counts in section BM25.
     const insSecFts2 = db.prepare("INSERT INTO sections_fts2 (note_id,ord,title,heading,text,project,topics) VALUES (?,?,?,?,?,?,?)");
     const topics = n.topics.join(" ");
+    const sections = splitSections(n.body);
     let count = 0;
-    for (const s of splitSections(n.body)) {
+    for (const s of sections) {
       const heading = s.heading || n.title;
       insSec.run(n.id, s.ord, heading, s.level, s.text);
       insSecFts.run(n.id, s.ord, heading, s.text);
       insSecFts2.run(n.id, s.ord, n.title, heading, s.text, n.project ?? "", topics);
       count++;
     }
+    // Every link occurrence, with the section window it sits in; resolution to notes happens in the graph.
+    const insEdge = db.prepare("INSERT INTO edges (from_id,pos,from_ord,kind,fm_key,target,target_heading,ctx) VALUES (?,?,?,?,?,?,?,?)");
+    const ords = linkWindows(n.body, n.linkOccs, sections);
+    n.linkOccs.forEach((o, i) => insEdge.run(n.id, o.pos, ords[i], o.kind, o.fmKey, o.target, o.heading, o.ctx));
+    this.graph.markDirty();
     // Keep vectors for ordinals that still exist (their hash decides whether they are re-embedded); drop the rest.
     this.dense?.forget(n.id, count);
     if (this.isMemoryFile(n.id)) this.facts.rebuild(n.body);
@@ -365,6 +469,8 @@ export class VaultIndex {
       this.db.prepare("DELETE FROM note_topics WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM note_tags WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM links WHERE from_id = ?").run(id);
+      this.db.prepare("DELETE FROM edges WHERE from_id = ?").run(id);
+      this.graph.markDirty();
       this.db.prepare("DELETE FROM sections WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM sections_fts WHERE note_id = ?").run(id);
       this.db.prepare("DELETE FROM sections_fts2 WHERE note_id = ?").run(id);
@@ -419,18 +525,33 @@ export class VaultIndex {
     return this.db.prepare("SELECT * FROM notes WHERE id = ?").get(id) as NoteRow | undefined;
   }
 
-  /** Resolve a note by id (path), title, alias, or basename. */
-  resolve(ref: string): NoteRow | undefined {
+  /**
+   * Resolve a note someone names (a tool argument): its id (path, in any case, .md optional), then a title, file name
+   * or alias (a hub wins a shared name, then a concept page, then the newest note), then the link rules: path suffix,
+   * names ignoring hyphens and underscores, retrieval shorthands (see LinkGraph.resolve). The write tools pass
+   * linkRules false, so a loose name never makes them change a note other than the one named.
+   */
+  resolve(ref: string, linkRules = true): NoteRow | undefined {
     const r = ref.trim().replace(/^\[\[|\]\]$/g, "");
     const direct = this.get(r) ?? this.get(r.endsWith(".md") ? r : `${r}.md`);
     if (direct) return direct;
+    const lower = r.toLowerCase();
+    const anyCase = this.db.prepare("SELECT * FROM notes WHERE lower(id) IN (?, ?) ORDER BY id LIMIT 1").get(lower, lower.endsWith(".md") ? lower : `${lower}.md`) as NoteRow | undefined;
+    if (anyCase) return anyCase;
     const rows = this.db
       .prepare(
         `SELECT n.* FROM titles t JOIN notes n ON n.id = t.note_id WHERE t.name = ?
-         ORDER BY CASE n.type WHEN 'hub' THEN 0 WHEN 'concept' THEN 1 ELSE 2 END, n.modified DESC LIMIT 1`,
+         ORDER BY CASE n.type WHEN 'hub' THEN 0 WHEN 'concept' THEN 1 ELSE 2 END, n.modified DESC, n.id LIMIT 1`,
       )
-      .all(r.toLowerCase()) as NoteRow[];
-    return rows[0];
+      .all(lower) as NoteRow[];
+    if (rows[0]) return rows[0];
+    return r && linkRules ? this.resolveLink("", r) : undefined;
+  }
+
+  /** The note a link written in `fromId` points at, by the link rules (see LinkGraph.resolve). */
+  resolveLink(fromId: string, target: string): NoteRow | undefined {
+    const to = this.graph.resolve(fromId, target);
+    return to ? this.get(to) : undefined;
   }
 
   count(): number {
@@ -469,18 +590,17 @@ export class VaultIndex {
     const quoted = terms.map((t) => `"${t}"*`);
     const fetchLimit = Math.min(limit * 3, 150);
     const run = (match: string): SearchHit[] => {
-      const params: Record<string, unknown> = { match, limit: fetchLimit };
+      const params: Record<string, unknown> = { match };
       const filter = this.buildFilter(o, params);
-      return this.db
-        .prepare(
-          `SELECT n.id, n.title, n.type, n.project, n.modified,
-                  snippet(notes_fts, 2, '**', '**', ' ... ', 28) AS snippet,
-                  bm25(notes_fts, 0, 4.0, 1.0) AS score
-           FROM notes_fts JOIN notes n ON n.id = notes_fts.note_id
-           WHERE notes_fts MATCH @match ${filter}
-           ORDER BY score LIMIT @limit`,
-        )
-        .all(params) as SearchHit[];
+      const stmt = this.db.prepare(
+        `SELECT n.id, n.title, n.type, n.project, n.modified,
+                snippet(notes_fts, 2, '**', '**', ' ... ', 28) AS snippet,
+                bm25(notes_fts, 0, 4.0, 1.0) AS score
+         FROM notes_fts JOIN notes n ON n.id = notes_fts.note_id
+         WHERE notes_fts MATCH @match ${filter}
+         ORDER BY score LIMIT @limit OFFSET @offset`,
+      );
+      return this.readableRows((limit, offset) => stmt.all({ ...params, limit, offset }) as SearchHit[], fetchLimit, (h) => h.id, o.readable);
     };
     // Fuse BM25 rank with title overlap so a short note whose title matches beats a huge note that mentions everything.
     const fuse = (hits: SearchHit[]): SearchHit[] =>
@@ -507,18 +627,17 @@ export class VaultIndex {
     if (!terms.length) return [];
     const quoted = terms.map((t) => `"${t}"*`);
     const run = (match: string): SectionHit[] => {
-      const params: Record<string, unknown> = { match, limit };
+      const params: Record<string, unknown> = { match };
       const filter = this.buildFilter(o, params);
-      return this.db
-        .prepare(
-          `SELECT s.note_id, s.ord, s.heading,
-                  snippet(sections_fts, 3, '**', '**', ' ... ', 24) AS snippet,
-                  bm25(sections_fts, 0, 0, 3.0, 1.0) AS score
-           FROM sections_fts s JOIN notes n ON n.id = s.note_id
-           WHERE sections_fts MATCH @match ${filter}
-           ORDER BY score LIMIT @limit`,
-        )
-        .all(params) as SectionHit[];
+      const stmt = this.db.prepare(
+        `SELECT s.note_id, s.ord, s.heading,
+                snippet(sections_fts, 3, '**', '**', ' ... ', 24) AS snippet,
+                bm25(sections_fts, 0, 0, 3.0, 1.0) AS score
+         FROM sections_fts s JOIN notes n ON n.id = s.note_id
+         WHERE sections_fts MATCH @match ${filter}
+         ORDER BY score LIMIT @limit OFFSET @offset`,
+      );
+      return this.readableRows((n, offset) => stmt.all({ ...params, limit: n, offset }) as SectionHit[], limit, (h) => h.note_id, o.readable);
     };
     try {
       const strict = run(quoted.join(" AND "));
@@ -533,24 +652,41 @@ export class VaultIndex {
   }
 
   // ------------------------------------------------------------ hybrid ranking
-  /** Query terms plus alias expansions and spelling corrections (originals are kept alongside). */
-  private understand(q: string): { terms: string[]; corrections: string[] } {
+  /**
+   * Query terms plus alias expansions and spelling corrections (originals are kept alongside). A correction must be a
+   * word some note the caller may read holds: a word only private notes use must not show up as "spelling read as".
+   */
+  private understand(q: string, readable?: (n: NoteRow) => boolean): { terms: string[]; corrections: string[] } {
     const raw = queryTerms(q);
     const out = new Set<string>();
     const corrections: string[] = [];
     const aliases = this.cfg.retrieval.aliases;
     for (const t of raw) {
-      if (aliases[t]) for (const x of queryTerms(aliases[t])) out.add(x);
+      // Own keys only: the term "constructor" must not reach Object.prototype.
+      const expanded = Object.hasOwn(aliases, t) ? aliases[t] : undefined;
+      if (typeof expanded === "string") for (const x of queryTerms(expanded)) out.add(x);
       out.add(t);
       const c = this.dense?.correct(t);
-      if (c) {
+      if (c && (!readable || this.wordReadable(c, readable))) {
         corrections.push(`${t}→${c}`);
         out.add(c);
       }
     }
     const lq = q.toLowerCase();
-    for (const [k, v] of Object.entries(aliases)) if (k.includes(" ") && lq.includes(k)) for (const x of queryTerms(v)) out.add(x);
+    for (const [k, v] of Object.entries(aliases)) if (typeof v === "string" && k.includes(" ") && lq.includes(k)) for (const x of queryTerms(v)) out.add(x);
     return { terms: [...out], corrections };
+  }
+
+  private wordReadable(word: string, readable: (n: NoteRow) => boolean): boolean {
+    try {
+      const rows = this.db.prepare("SELECT DISTINCT note_id FROM sections_fts2 WHERE sections_fts2 MATCH ?").all(`"${word.replace(/"/g, "")}"`) as { note_id: string }[];
+      return rows.some((r) => {
+        const n = this.get(r.note_id);
+        return !!n && readable(n);
+      });
+    } catch {
+      return false;
+    }
   }
 
   private noteFilterOk(n: NoteRow | undefined, o: SearchOptions): n is NoteRow {
@@ -560,22 +696,22 @@ export class VaultIndex {
     if (o.since && n.modified < o.since) return false;
     if (o.until && n.modified > o.until) return false;
     if (o.topic && !this.topicsOf(n.id).some((t) => t.toLowerCase() === o.topic!.toLowerCase())) return false;
+    if (o.readable && !o.readable(n)) return false;
     return true;
   }
 
   /** Section BM25 over the OR of all terms (title x4, heading x2, project/topics x1.5), honouring the note filters. */
   private bm25Sections(terms: string[], o: SearchOptions, limit: number): { key: string; note_id: string; ord: number }[] {
     if (!terms.length) return [];
-    const params: Record<string, unknown> = { match: terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR "), limit };
+    const params: Record<string, unknown> = { match: terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ") };
     const filter = this.buildFilter(o, params);
     try {
-      const rows = this.db
-        .prepare(
-          `SELECT s.note_id, s.ord, bm25(sections_fts2, 0, 0, 4.0, 2.0, 1.0, 1.5, 1.5) AS score
-           FROM sections_fts2 s JOIN notes n ON n.id = s.note_id
-           WHERE sections_fts2 MATCH @match ${filter} ORDER BY score LIMIT @limit`,
-        )
-        .all(params) as { note_id: string; ord: number }[];
+      const stmt = this.db.prepare(
+        `SELECT s.note_id, s.ord, bm25(sections_fts2, 0, 0, 4.0, 2.0, 1.0, 1.5, 1.5) AS score
+         FROM sections_fts2 s JOIN notes n ON n.id = s.note_id
+         WHERE sections_fts2 MATCH @match ${filter} ORDER BY score LIMIT @limit OFFSET @offset`,
+      );
+      const rows = this.readableRows((n, offset) => stmt.all({ ...params, limit: n, offset }) as { note_id: string; ord: number }[], limit, (r) => r.note_id, o.readable);
       return rows.map((r) => ({ key: `${r.note_id}#${r.ord}`, note_id: r.note_id, ord: r.ord }));
     } catch (e) {
       console.error(`[rank] bm25: ${(e as Error).message}`);
@@ -585,10 +721,39 @@ export class VaultIndex {
 
   /** Sections containing an ISO date verbatim: FTS5 splits 2026-09-24 into three weak tokens, so this list restores exact matches. */
   private dateHits(dates: string[], o: SearchOptions): { key: string; note_id: string; ord: number }[] {
-    const stmt = this.db.prepare("SELECT note_id, ord FROM sections WHERE instr(text, ?) > 0 LIMIT 40");
+    // Filtered before the cut of 40, so notes the caller may not read cannot take the places.
+    const stmt = this.db.prepare("SELECT note_id, ord FROM sections WHERE instr(text, ?) > 0 ORDER BY note_id, ord");
     const out: { key: string; note_id: string; ord: number }[] = [];
-    for (const d of dates) for (const r of stmt.all(d) as { note_id: string; ord: number }[]) if (this.noteFilterOk(this.get(r.note_id), o)) out.push({ key: `${r.note_id}#${r.ord}`, ...r });
+    for (const d of dates) {
+      let n = 0;
+      for (const r of stmt.all(d) as { note_id: string; ord: number }[]) {
+        if (n >= 40) break;
+        if (!this.noteFilterOk(this.get(r.note_id), o)) continue;
+        out.push({ key: `${r.note_id}#${r.ord}`, ...r });
+        n++;
+      }
+    }
     return out;
+  }
+
+  /**
+   * The first `want` rows of a ranked query whose notes the caller may read. A SQL LIMIT counts every note, so without
+   * this a vault with many private matches would push readable ones out of the list; pages are fetched until enough
+   * readable rows are found. Without a readable check this is one query.
+   */
+  private readableRows<T>(fetch: (limit: number, offset: number) => T[], want: number, noteOf: (r: T) => string, readable?: (n: NoteRow) => boolean): T[] {
+    if (!readable) return fetch(want, 0);
+    const out: T[] = [];
+    const page = Math.max(2 * want, 50);
+    for (let offset = 0; out.length < want; offset += page) {
+      const rows = fetch(page, offset);
+      for (const r of rows) {
+        const n = this.get(noteOf(r));
+        if (n && readable(n)) out.push(r);
+      }
+      if (rows.length < page) break;
+    }
+    return out.slice(0, want);
   }
 
   /**
@@ -596,37 +761,58 @@ export class VaultIndex {
    * rerank of the top `rerankN` (only the top 3 when BM25 and dense already agree on #1) → blended score
    * → gate. Falls back to keyword-only fusion (coverage "lexical") when the models are unavailable.
    */
-  async rankSections(query: string, o: SearchOptions & { k?: number } = {}): Promise<RankResult> {
+  async rankSections(query: string, o: SearchOptions & { k?: number; debug?: boolean } = {}): Promise<RankResult> {
     const t0 = Date.now();
     const rc = this.cfg.retrieval;
     const k = Math.min(Math.max(o.k ?? 10, 1), 50);
-    const u = this.understand(query);
+    const u = this.understand(query, o.readable);
     const dates = query.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
-    const lex = this.bm25Sections(u.terms, o, 40);
-    const exact = dates.length ? this.dateHits(dates, o) : [];
     const noteCache = new Map<string, NoteRow | undefined>();
     const noteOf = (id: string) => {
       if (!noteCache.has(id)) noteCache.set(id, this.get(id));
       return noteCache.get(id);
     };
+    // The SQL filters cover project/type/dates/topic; readability is checked while each list is filled, so notes the
+    // caller may not read never take a place in it (see readableRows).
+    const lex = this.bm25Sections(u.terms, o, 40);
+    const exact = dates.length ? this.dateHits(dates, o) : [];
     const modelsOk = this.dense ? await this.dense.ready() : false;
-    const den = modelsOk
-      ? (await this.dense!.search(query, 40)).filter((h) => this.noteFilterOk(noteOf(h.note_id), o)).map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }))
-      : [];
+    // Every section's cosine, best first (one embedding): the meaning list is its top 40, and the graph step reads it.
+    const dAll = modelsOk ? await this.dense!.scoreAll(query) : [];
+    const den = (o.readable ? dAll.filter((h) => { const n = noteOf(h.note_id); return !!n && o.readable!(n); }) : dAll)
+      .slice(0, 40)
+      .filter((h) => this.noteFilterOk(noteOf(h.note_id), o))
+      .map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }));
     // Note-level BM25 (title x4 over the whole body) as a fourth list, anchored on each note's first window:
     // a note whose title names the subject still competes when no single window carries every term.
+    // A note with no section (an empty file, or frontmatter only) has nothing to return, so its title alone must not
+    // reach the reranker and win the coverage label.
+    const secStmt = this.db.prepare("SELECT heading, text FROM sections WHERE note_id = ? AND ord = ?");
     const noteList = this.search(u.terms.join(" "), { ...o, limit: 15 })
-      .filter((h) => this.noteFilterOk(noteOf(h.id), o))
+      .filter((h) => this.noteFilterOk(noteOf(h.id), o) && secStmt.get(h.id, 0))
       .map((h) => ({ key: `${h.id}#0`, note_id: h.id, ord: 0 }));
     const lists = [lex, den, exact, noteList].filter((l) => l.length);
     const fused = rrf(lists);
-    const secStmt = this.db.prepare("SELECT heading, text FROM sections WHERE note_id = ? AND ord = ?");
     const materialise = (item: { note_id: string; ord: number }, score: number, rprob: number, why: string[]): RankedSection | null => {
       const note = noteOf(item.note_id);
       const sec = secStmt.get(item.note_id, item.ord) as { heading: string; text: string } | undefined;
       if (!note || !sec) return null;
       return { note_id: item.note_id, ord: item.ord, heading: sec.heading, text: sec.text, note, score, rprob, why };
     };
+    const stats: RankStats = {
+      lists: { lex: lex.length, den: den.length, exact: exact.length, note: noteList.length },
+      fused: fused.length,
+      pool: 0,
+      reranked: 0,
+      topProb: null,
+    };
+    const debug: RankDebug | undefined = o.debug
+      ? {
+          lists: { lex: lex.map((x) => x.key), den: den.map((x) => x.key), exact: exact.map((x) => x.key), note: noteList.map((x) => x.key) },
+          fused: fused.slice(0, 200).map((f) => ({ key: f.key, score: f.score })),
+          pool: [],
+        }
+      : undefined;
     const done = (sections: RankedSection[], coverage: RankResult["coverage"], earlyExit: boolean): RankResult => ({
       sections,
       coverage,
@@ -634,6 +820,8 @@ export class VaultIndex {
       terms: u.terms,
       earlyExit,
       ms: Date.now() - t0,
+      stats,
+      ...(debug ? { debug } : {}),
     });
     if (!fused.length) return done([], modelsOk ? "none" : "lexical", false);
     const fusedTop = fused[0].score;
@@ -644,27 +832,117 @@ export class VaultIndex {
         const s = materialise(f.item, f.score / fusedTop, NaN, ["keyword fusion"]);
         if (s) out.push(s);
       }
+      stats.pool = out.length;
+      if (debug)
+        debug.pool = fused.slice(0, k).map((f, i) => ({ key: f.key, src: "head", fusedRank: i + 1, reranked: false, prob: null, score: f.score / fusedTop, cut: "kept" }));
       return done(out, "lexical", false);
     }
 
-    const cands = fused.slice(0, rc.rerankN);
-    // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
-    // the long memory file, can fall far below other notes' first windows that collect votes from several lists.
-    for (const best of [lex[0], den[0], exact[0], noteList[0]]) {
-      if (!best || cands.some((c) => c.key === best.key)) continue;
-      const f = fused.find((x) => x.key === best.key);
-      if (f) cands.push(f);
+    let cands = fused.slice(0, rc.rerankN);
+    const headN = cands.length;
+    if (rc.firstPicks) {
+      // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
+      // the long memory file, can fall far below other notes' first windows that collect votes from several lists.
+      for (const best of [lex[0], den[0], exact[0], noteList[0]]) {
+        if (!best || cands.some((c) => c.key === best.key)) continue;
+        const f = fused.find((x) => x.key === best.key);
+        if (f) cands.push(f);
+      }
     }
+    if (!cands.length) return done([], "none", false);
     // The shortcut needs the agreed section inside the reranked head. The note-level list can lift other notes'
     // first windows above it (a long note such as the memory file competes there through its first window only),
-    // and a head without it would gate a well-answered query to "none".
+    // and a head without it would gate a well-answered query to "none". With firstPicks off this is 0.4.0's rule,
+    // which took the shortcut whenever the two lists agreed.
     const agree =
-      rc.earlyExit && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key && cands.slice(0, 3).some((c) => c.key === lex[0].key);
-    const passage = (c: { item: { note_id: string; ord: number } }) => {
+      rc.earlyExit &&
+      lex.length > 0 &&
+      den.length > 0 &&
+      lex[0].key === den[0].key &&
+      (!rc.firstPicks || cands.slice(0, 3).some((c) => c.key === lex[0].key));
+    // ---- the link graph (retrieval.graph): linked sections may take reranker places, never on the shortcut.
+    // Graph rows go after every list's rows (from `graphFrom`); the pool keeps its size, so the pairs stay the same.
+    const gc = clampGraph(rc.graph);
+    let headKept = headN;
+    let graphFrom = cands.length;
+    const graphRows = new Map<number, GraphPick>();
+    const prefixOf = new Map<number, string>();
+    const gstats: GraphStats | undefined = gc.enabled ? (stats.graph = { ran: false, seeds: 0, candidates: 0, admitted: 0, displaced: 0, partners: 0, topProb: null, ms: 0 }) : undefined;
+    let gdebug: RankDebug["graph"];
+    if (gstats && debug) gdebug = debug.graph = { seeds: [], candidates: [], displaced: [], partners: [] };
+    const maxSlots = Math.min(gc.slots, headN - TOP_FIXED);
+    if (gstats && !agree && maxSlots > 0) {
+      const g0 = Date.now();
+      const accessOf = new Map<string, Access>();
+      const access = (id: string): Access => {
+        let a = accessOf.get(id);
+        if (!a) {
+          const n = noteOf(id);
+          a = !n || (o.readable && !o.readable(n)) ? "hidden" : this.noteFilterOk(n, o) ? "ok" : "filtered";
+          accessOf.set(id, a);
+        }
+        return a;
+      };
+      const cosOf = new Map<string, number>();
+      const bestOf = new Map<string, { ord: number; cos: number }>();
+      for (const h of dAll) {
+        cosOf.set(`${h.note_id}#${h.ord}`, h.score);
+        if (!bestOf.has(h.note_id)) bestOf.set(h.note_id, { ord: h.ord, cos: h.score });
+      }
+      const seeds: Seed[] = [];
+      for (const f of fused.slice(0, Math.min(gc.seeds, headN)))
+        if (!seeds.some((x) => x.note === f.item.note_id)) seeds.push({ note: f.item.note_id, key: f.key, title: noteOf(f.item.note_id)?.title ?? f.item.note_id, score: f.score / fusedTop });
+      const sel = selectGraphPicks({
+        seeds,
+        neighbours: (id) => this.graph.neighbours(id),
+        isStructural: (id) => this.graph.isStructural(id),
+        access,
+        listed: new Set(cands.map((c) => c.item.note_id)),
+        bestWindow: (id) => bestOf.get(id),
+        minWeight: gc.minWeight,
+        linksPerSeed: gc.linksPerSeed,
+        max: maxSlots,
+      });
+      const keys = (l: { key: string }[]) => l.map((x) => x.key);
+      const protect = protectedKeys({ lex: keys(lex), den: keys(den), exact: keys(exact), note: keys(noteList) }, seeds.map((x) => x.key), keys(cands.slice(0, headN)));
+      const sw = fairSwap({ head: cands.slice(0, headN).map((c) => ({ key: c.key, score: c.score })), picks: sel.picks, fusedTop, protect, swapWeight: gc.swapWeight });
+      if (sw.admitted.length) {
+        const gone = new Set(sw.displaced.map((d) => d.key));
+        const rest = cands.filter((c) => !gone.has(c.key));
+        headKept = headN - gone.size;
+        graphFrom = rest.length;
+        // A graph row keeps the fused score some list gave it, or 0: no fused evidence is invented.
+        const fusedScore = new Map(fused.map((f) => [f.key, f.score]));
+        cands = [...rest, ...sw.admitted.map((g) => ({ key: g.key, score: fusedScore.get(g.key) ?? 0, item: { key: g.key, note_id: g.note, ord: g.ord } }))];
+        sw.admitted.forEach((g, j) => {
+          graphRows.set(graphFrom + j, g);
+          const pre = gc.prefix
+            ? graphPrefix(g, {
+                windowCos: (key) => cosOf.get(key) ?? -1,
+                ctx: (from, pos) => this.graph.ctx(from, pos),
+                heading: (note, ord) => (secStmt.get(note, ord) as { heading: string } | undefined)?.heading ?? null,
+              })
+            : null;
+          if (pre) prefixOf.set(graphFrom + j, pre);
+        });
+      }
+      Object.assign(gstats, { ran: true, seeds: seeds.length, candidates: sel.picks.length + sel.overflow.length, admitted: sw.admitted.length, displaced: sw.displaced.length, ms: Date.now() - g0 });
+      if (gdebug) {
+        gdebug.seeds = seeds.map((x) => ({ note: x.note, key: x.key, score: x.score }));
+        const status = new Map<GraphPick, CandTrace["status"]>([...sw.admitted.map((g) => [g, "admitted"] as const), ...sw.beaten.map((g) => [g, "beaten"] as const), ...sw.noSlot.map((g) => [g, "no-slot"] as const)]);
+        gdebug.candidates = [
+          ...sel.picks.map((g) => ({ note: g.note, key: g.key, seed: g.seed.note, dir: g.nb.dir, kind: g.nb.kind, strength: g.nb.strength, fit: g.fit, score: g.score, status: status.get(g) ?? "no-slot" })),
+          ...sel.trace,
+        ];
+        gdebug.displaced = sw.displaced;
+      }
+    }
+    const passage = (c: { item: { note_id: string; ord: number } }, i: number) => {
       const note = noteOf(c.item.note_id);
       const sec = secStmt.get(c.item.note_id, c.item.ord) as { heading: string; text: string } | undefined;
       const head = sec && note && sec.heading.toLowerCase() !== note.title.toLowerCase() ? ` / ${sec.heading}` : "";
-      return `${note?.title ?? ""}${head}\n${sec?.text ?? ""}`;
+      const pre = prefixOf.get(i);
+      return `${pre ? `${pre}\n` : ""}${note?.title ?? ""}${head}\n${sec?.text ?? ""}`;
     };
     let probs: number[];
     if (agree) {
@@ -677,20 +955,101 @@ export class VaultIndex {
       probs = await this.dense!.rerank(query, cands.map(passage));
     }
     const reranked = agree ? Math.min(3, cands.length) : cands.length;
-    const topR = Math.max(...probs.slice(0, reranked));
-    if (topR < rc.floor) return done([], "none", agree);
-    const scored = cands.map((c, i) => ({ c, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
+    // The floor and the coverage label come from the lists' rows only: a linked section cannot turn "none" into an
+    // answer or "thin" into "good".
+    const topR = Math.max(...probs.slice(0, Math.min(reranked, graphFrom)));
+    stats.pool = cands.length;
+    stats.reranked = reranked;
+    stats.topProb = topR;
+    if (gstats && graphFrom < cands.length) gstats.topProb = Math.max(...probs.slice(graphFrom, reranked));
+    const fusedRankOf = new Map(fused.map((f, i) => [f.key, i + 1]));
+    const pool: PoolEntry[] = cands.map((c, i) => {
+      const g = graphRows.get(i);
+      return {
+        key: c.key,
+        src: i < headKept ? "head" : i < graphFrom ? "first" : "graph",
+        fusedRank: fusedRankOf.get(c.key) ?? 0,
+        reranked: i < reranked,
+        prob: i < reranked ? probs[i] : null,
+        score: null,
+        cut: "floor",
+        ...(g ? { graph: { seed: g.seed.note, dir: g.nb.dir, kind: g.nb.kind, strength: g.nb.strength, fit: g.fit, score: g.score, prefixed: prefixOf.has(i) } } : {}),
+      };
+    });
+    if (debug) debug.pool = pool;
+    // With agreeOverride, keyword and meaning search putting the same section first answers "thin" with that note
+    // instead of refusing: evidence the reranker missed, though one rare shared word makes both searches agree too.
+    // (Only when that note reached the reranker: with firstPicks off it can sit below the shortlist.)
+    const searchAgrees = rc.agreeOverride && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key && cands.some((c) => c.item.note_id === lex[0].note_id);
+    if (topR < rc.floor && !searchAgrees) return done([], "none", agree);
+    const overridden = topR < rc.floor;
+    const isGraph = (i: number) => i >= graphFrom;
+    const scored = cands.map((c, i) => ({ c, i, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
     scored.sort((a, b) => b.score - a.score);
-    const top = scored[0].score;
+    // The trim bar and minKeep count the lists' rows only, so a linked section cannot raise the bar or use up minKeep.
+    const top = (scored.find((x) => !isGraph(x.i)) ?? scored[0]).score;
+    const bar = Math.max(0.02, rc.keepRatio * top);
+    const tagsOf = (key: string) => [...(lex.some((x) => x.key === key) ? ["keyword"] : []), ...(den.some((x) => x.key === key) ? ["semantic"] : []), ...(exact.some((x) => x.key === key) ? ["exact date"] : []), ...(noteList.some((x) => x.key === key) ? ["title"] : [])];
     const out: RankedSection[] = [];
+    // Sorted best first, so once one entry is trimmed or past k, every later one is too. The best `minKeep` are
+    // never trimmed: the second note of a two-note answer often scores far below the first. A linked section is kept
+    // on its own merits (at least the floor) and never stops the walk.
+    let stop: PoolCut | null = null;
+    let keptBase = 0;
     for (const s of scored) {
-      if (s.score < Math.max(0.02, rc.keepRatio * top)) break;
-      const why = [s.reranked ? `rerank ${s.prob.toFixed(2)}` : "fused tail", ...(lex.some((x) => x.key === s.c.key) ? ["keyword"] : []), ...(den.some((x) => x.key === s.c.key) ? ["semantic"] : []), ...(exact.some((x) => x.key === s.c.key) ? ["exact date"] : []), ...(noteList.some((x) => x.key === s.c.key) ? ["title"] : [])];
+      pool[s.i].score = s.score;
+      // An overridden answer vouches for the agreed note only; everything else scored under the floor.
+      if (overridden && s.c.item.note_id !== lex[0].note_id) {
+        pool[s.i].cut = "floor";
+        continue;
+      }
+      if (isGraph(s.i)) {
+        const cut = stop ?? (s.prob < rc.floor ? "floor" : s.score < bar ? "trim" : out.length >= k ? "limit" : null);
+        if (cut) {
+          pool[s.i].cut = cut;
+          continue;
+        }
+      } else {
+        if (!stop && keptBase >= rc.minKeep && s.score < bar) stop = "trim";
+        if (!stop && out.length >= k) stop = "limit";
+        if (stop) {
+          pool[s.i].cut = stop;
+          continue;
+        }
+      }
+      const g = graphRows.get(s.i);
+      const why = [s.reranked ? `rerank ${s.prob.toFixed(2)}` : "fused tail", ...(g ? [`graph: ${g.nb.dir === "out" ? "linked from" : "links to"} ${g.seed.title}`] : []), ...tagsOf(s.c.key)];
       const sec = materialise(s.c.item, s.score, s.reranked ? s.prob : NaN, why);
-      if (sec) out.push(sec);
-      if (out.length >= k) break;
+      if (sec) {
+        out.push(sec);
+        pool[s.i].cut = "kept";
+        if (!g) keptBase++;
+      }
     }
-    return done(out, topR >= 0.3 ? "good" : "thin", agree);
+    // A trimmed section linked with a kept hit is kept after all, after every hit (at most keepLinked).
+    if (gstats && gc.keepLinked > 0 && !agree && !overridden && stop === "trim" && out.length < k) {
+      const partners = linkedPartners({
+        order: scored.map((x) => ({ i: x.i, note: x.c.item.note_id, cut: pool[x.i].cut, reranked: x.reranked, graph: isGraph(x.i) })),
+        kept: [...new Set(out.map((x) => x.note_id))],
+        neighbours: (id) => this.graph.neighbours(id),
+        isStructural: (id) => this.graph.isStructural(id),
+        minWeight: gc.keepMinWeight,
+        max: gc.keepLinked,
+        room: k - out.length,
+      });
+      for (const pt of partners) {
+        const x = scored.find((y) => y.i === pt.i)!;
+        const sec = materialise(x.c.item, x.score, x.prob, [`rerank ${x.prob.toFixed(2)}`, `link partner of ${noteOf(pt.anchor)?.title ?? pt.anchor}`, ...tagsOf(x.c.key)]);
+        if (!sec) continue;
+        out.push(sec);
+        pool[pt.i].cut = "kept";
+        pool[pt.i].partnerOf = pt.anchor;
+        gstats.ran = true;
+        gstats.partners++;
+        gdebug?.partners.push({ key: x.c.key, anchor: pt.anchor, strength: pt.strength, kind: pt.kind });
+      }
+    }
+    return done(out, !overridden && topR >= rc.goodAt ? "good" : "thin", agree);
   }
 
   /** Note-level hybrid search: a note scores as its best section, which also supplies the snippet. */
@@ -708,7 +1067,7 @@ export class VaultIndex {
       snippet: `${s.heading && s.heading !== s.note.title ? `[${s.heading}] ` : ""}${s.text.replace(/^#+\s.*\n?/, "").replace(/\s+/g, " ").slice(0, 220)}`,
       score: s.score,
     }));
-    return { hits, coverage: r.coverage, corrections: r.corrections };
+    return { hits, coverage: r.coverage, corrections: r.corrections, stats: r.stats };
   }
 
   section(noteId: string, ord: number): SectionRow | undefined {
@@ -774,21 +1133,21 @@ export class VaultIndex {
     return (this.db.prepare("SELECT tag FROM note_tags WHERE note_id = ? ORDER BY tag").all(id) as { tag: string }[]).map((r) => r.tag);
   }
 
+  /** The links a note makes (ParsedNote.links), each resolved by the link rules; `note` is undefined when nothing matches. */
   outgoing(id: string): { target: string; note: NoteRow | undefined }[] {
     const rows = this.db.prepare("SELECT target FROM links WHERE from_id = ? ORDER BY target").all(id) as { target: string }[];
-    return rows.map((r) => ({ target: r.target, note: this.resolve(r.target) }));
+    return rows.map((r) => ({ target: r.target, note: this.resolveLink(id, r.target) }));
   }
 
+  /** Notes whose links resolve to this one (same rules as outgoing), newest first. */
   backlinks(id: string, limit = 100): NoteRow[] {
-    const names = (this.db.prepare("SELECT name FROM titles WHERE note_id = ?").all(id) as { name: string }[]).map((r) => r.name);
-    if (!names.length) return [];
-    const q = names.map(() => "?").join(",");
-    return this.db
-      .prepare(
-        `SELECT DISTINCT n.* FROM links l JOIN notes n ON n.id = l.from_id
-         WHERE l.target IN (${q}) AND n.id != ? ORDER BY n.modified DESC LIMIT ?`,
-      )
-      .all(...names, id, limit) as NoteRow[];
+    return this.graph
+      .linkers(id)
+      .filter((from) => from !== id)
+      .map((from) => this.get(from))
+      .filter((n): n is NoteRow => !!n)
+      .sort((a, b) => (a.modified !== b.modified ? (a.modified < b.modified ? 1 : -1) : a.id < b.id ? -1 : 1))
+      .slice(0, limit);
   }
 
   sharedTopicNeighbours(id: string, limit = 10): { note: NoteRow; shared: string[] }[] {
@@ -806,5 +1165,89 @@ export class VaultIndex {
 
   projectNames(): string[] {
     return (this.db.prepare("SELECT DISTINCT project FROM notes WHERE project IS NOT NULL ORDER BY project").all() as { project: string }[]).map((r) => r.project);
+  }
+
+  /**
+   * Existing notes a text names without linking: titles and aliases of notes the caller may read, the first mention
+   * of each, at most `max`, in the order they appear. Left out: hubs and concept pages, the memory file, `selfId`, and
+   * any note the text already links. A name needs two or more words (any case), or one word of five or more letters
+   * written with the title's own capitals that occurs in at most 5% of sections, so common words stay quiet. Code,
+   * links, URLs and headings are not searched. Write tools return these so the caller can link them in a sentence.
+   */
+  unlinkedMentions(written: string, selfId: string | null, canRead: (n: NoteRow) => boolean, max = 3): Mention[] {
+    // Blank out what must not match, keeping positions so snippets come from the original text.
+    const text = written.replace(/\r\n/g, "\n");
+    const blank = (s: string) => s.replace(/[^\n]/g, " ");
+    const lines = text.split("\n");
+    const code = codeLines(lines);
+    let masked = lines.map((l, i) => (code[i] ? blank(l) : l)).join("\n");
+    masked = masked.replace(CODE_SPAN, blank).replace(/!?\[\[[^\]\n]*\]\]/g, blank).replace(/\]\([^)\n]*\)/g, blank).replace(/https?:\/\/\S+/g, blank);
+    masked = masked.replace(/^#{1,6}\s.*$/gm, blank);
+    const lower = masked.toLowerCase();
+    const linked = new Set<string>();
+    for (const o of extractLinks(text, {})) {
+      const id = this.graph.resolve(selfId ?? "", o.target);
+      if (id) linked.add(id);
+    }
+    const nSections = (this.db.prepare("SELECT COUNT(*) c FROM sections").get() as { c: number }).c || 1;
+    // A word is common when other notes use it a lot: the named note's own sections and the note being written don't count.
+    const dfStmt = this.db.prepare("SELECT COUNT(*) c FROM sections_fts2 WHERE sections_fts2 MATCH ? AND note_id NOT IN (?, ?)");
+    const rare = (word: string, noteId: string) => {
+      try {
+        return (dfStmt.get(`"${word.replace(/"/g, "")}"`, noteId, selfId ?? "") as { c: number }).c <= 0.05 * nSections;
+      } catch {
+        return false;
+      }
+    };
+    const names: { id: string; title: string; name: string }[] = [];
+    const rows = this.db.prepare("SELECT id, title, type, project, visibility, frontmatter FROM notes ORDER BY id").all() as NoteRow[];
+    for (const r of rows) {
+      if (r.id === selfId || this.isMemoryFile(r.id) || STRUCTURAL_TYPES.has(r.type) || linked.has(r.id) || !canRead(r)) continue;
+      let aliases: string[] = [];
+      try {
+        const fm = JSON.parse(r.frontmatter) as Record<string, unknown>;
+        aliases = (Array.isArray(fm.aliases) ? fm.aliases : typeof fm.aliases === "string" ? fm.aliases.split(",") : []).map((a) => stripLink(a)).filter(Boolean);
+      } catch {}
+      for (const name of new Set([r.title, ...aliases].map((s) => s.trim()).filter(Boolean))) names.push({ id: r.id, title: r.title, name });
+    }
+    // Longest names first, so "Harbor Ledger progress" wins over "Harbor Ledger" where both fit.
+    names.sort((a, b) => b.name.length - a.name.length || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const found: (Mention & { at: number })[] = [];
+    const taken: [number, number][] = [];
+    const seen = new Set<string>();
+    for (const n of names) {
+      if (seen.has(n.id)) continue;
+      const multi = /\s/.test(n.name);
+      if (!multi && (n.name.length < 5 || !/^\p{L}/u.test(n.name))) continue;
+      if (!lower.includes(n.name.toLowerCase())) continue;
+      const esc = n.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      const re = new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, multi ? "giu" : "gu");
+      // The first mention not already inside a longer name found earlier.
+      let m: RegExpExecArray | null = null;
+      for (const x of masked.matchAll(re)) {
+        if (!taken.some(([s, e]) => x.index! < e && x.index! + x[0].length > s)) {
+          m = x as RegExpExecArray;
+          break;
+        }
+      }
+      if (!m) continue;
+      const start = m.index;
+      const end = start + m[0].length;
+      if (!multi && !rare(n.name, n.id)) continue;
+      taken.push([start, end]);
+      seen.add(n.id);
+      // The sentence holding the mention, from the original text.
+      const before = text.slice(0, start);
+      const from = Math.max(before.lastIndexOf("\n"), before.search(/[.!?]\s[^.!?]*$/) + 1, 0);
+      const afterIdx = text.slice(end).search(/[.!?\n]/);
+      const to = afterIdx < 0 ? text.length : end + afterIdx + 1;
+      let snippet = text.slice(from, to).replace(/\s+/g, " ").trim();
+      if (snippet.length > 160) snippet = `${snippet.slice(0, 157).trimEnd()}…`;
+      found.push({ id: n.id, title: n.title, name: m[0], snippet, at: start });
+    }
+    return found
+      .sort((a, b) => a.at - b.at)
+      .slice(0, max)
+      .map(({ at, ...m }) => m);
   }
 }

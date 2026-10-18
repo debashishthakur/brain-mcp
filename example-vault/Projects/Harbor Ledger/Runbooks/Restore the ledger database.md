@@ -29,7 +29,7 @@ Use this when the `ledger` schema is corrupted, a migration went wrong, or the h
 2. Restore the dump file to a scratch folder: `restic restore <snapshot-id> --target /tmp/ledger-restore --include /var/backups/pg/ledger.dump`.
 3. Recreate the schema in place: `pg_restore --clean --if-exists --schema=ledger --dbname=household /tmp/ledger-restore/var/backups/pg/ledger.dump`.
 4. Check row counts against the snapshot date: `select count(*), max(booking_date) from ledger.transactions;`.
-5. Start the importer again: `systemctl start harbor-import.timer`. The fingerprint check means re-importing the last few statements is safe.
+5. Start the importer again: `systemctl start harbor-import.timer`. The fingerprint check described in [[Harbor Ledger progress 2026-09]] means re-importing the last few statements is safe.
 
 ## If it fails
 

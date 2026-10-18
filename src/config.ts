@@ -2,11 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DENSE_DEFAULTS, type DenseConfig } from "./vault/dense.js";
+import { DENSE_DEFAULTS, floorFor, type DenseConfig } from "./vault/dense.js";
+import { clampGraph, type GraphConfig } from "./vault/graph.js";
 
 export interface BrainConfig {
   /** Hybrid retrieval (BM25 + local embeddings + reranker). Every field is optional; see DENSE_DEFAULTS. */
-  retrieval?: Partial<DenseConfig>;
+  retrieval?: Partial<Omit<DenseConfig, "graph">> & { graph?: boolean | Partial<GraphConfig> };
   vaultPath: string;
   /** Index and auth database folder, relative to the config file. Default: <package>/data, or ~/.brain-mcp/data when installed from npm. */
   dataDir?: string;
@@ -98,6 +99,14 @@ export function resolveConfigPath(overridePath?: string): string {
   return path.resolve(overridePath ?? process.env.BRAIN_MCP_CONFIG ?? defaultConfig());
 }
 
+/** `retrieval.graph` may be true/false (just the switch) or a partial object; its weight tables merge key by key. */
+function mergeGraph(raw: boolean | Partial<GraphConfig> | undefined): GraphConfig {
+  const d = DENSE_DEFAULTS.graph;
+  if (raw === undefined || raw === null) return { ...d, kinds: { ...d.kinds }, keys: { ...d.keys } };
+  if (typeof raw === "boolean") return { ...d, enabled: raw, kinds: { ...d.kinds }, keys: { ...d.keys } };
+  return { ...d, ...raw, kinds: { ...d.kinds, ...(raw.kinds ?? {}) }, keys: { ...d.keys, ...(raw.keys ?? {}) } };
+}
+
 export function loadConfig(overridePath?: string): ResolvedConfig {
   const cfgPath = resolveConfigPath(overridePath);
   const raw = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as BrainConfig;
@@ -114,7 +123,17 @@ export function loadConfig(overridePath?: string): ResolvedConfig {
   if (process.env.BRAIN_MCP_PUBLIC_URL) auth.publicUrl = process.env.BRAIN_MCP_PUBLIC_URL;
   if (process.env.BRAIN_MCP_HOST) raw.http.host = process.env.BRAIN_MCP_HOST;
   if (process.env.BRAIN_MCP_PORT) raw.http.port = Number(process.env.BRAIN_MCP_PORT);
-  const retrieval: DenseConfig = { ...DENSE_DEFAULTS, ...(raw.retrieval ?? {}), aliases: { ...DENSE_DEFAULTS.aliases, ...(raw.retrieval?.aliases ?? {}) } };
+  const retrieval: DenseConfig = {
+    ...DENSE_DEFAULTS,
+    ...(raw.retrieval ?? {}),
+    aliases: { ...DENSE_DEFAULTS.aliases, ...(raw.retrieval?.aliases ?? {}) },
+    graph: mergeGraph(raw.retrieval?.graph),
+  };
+  // The floor depends on the reranker's scale: use the model's calibrated one unless the config sets its own.
+  if (raw.retrieval?.floor === undefined) retrieval.floor = floorFor(retrieval.rerankModel);
   if (process.env.BRAIN_MCP_HYBRID === "0") retrieval.hybrid = false; // emergency switch back to keyword-only ranking
+  if (process.env.BRAIN_MCP_GRAPH === "0" || process.env.BRAIN_MCP_GRAPH === "1") retrieval.graph.enabled = process.env.BRAIN_MCP_GRAPH === "1";
+  if (process.env.BRAIN_MCP_GRAPH_SLOTS) retrieval.graph.slots = Number(process.env.BRAIN_MCP_GRAPH_SLOTS);
+  retrieval.graph = clampGraph(retrieval.graph);
   return { ...raw, auth, retrieval, rootDir: ROOT_DIR, configPath: cfgPath, vaultDir, dataDir, modelsDir, logDir };
 }

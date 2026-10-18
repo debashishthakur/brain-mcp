@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { GRAPH_DEFAULTS, type GraphConfig } from "./graph.js";
 
 /**
  * Local dense retrieval for the vault: section embeddings (bge-small, int8) stored next to the FTS
@@ -23,15 +24,34 @@ export interface DenseConfig {
   rerankMaxLen: number;
   /** Weight of the fused lexical/dense rank in the final score; the reranker gets the rest. */
   blend: number;
-  /** Best reranker probability below which the vault is declared silent on the question. */
+  /** Best reranker probability below which the vault is declared silent on the question. Depends on the reranker model. */
   floor: number;
+  /** Best reranker probability at or above which coverage is "good" rather than "thin". Depends on the reranker model. */
+  goodAt: number;
   /** Keep hits scoring at least this fraction of the best hit. */
   keepRatio: number;
+  /** Always keep this many of the best hits, whatever keepRatio says (0 = keepRatio alone decides). */
+  minKeep: number;
+  /**
+   * When keyword search and meaning search both put the same section first, answer "thin" with that note instead of
+   * refusing, even if the reranker scores everything under the floor. Off by default: on a 196-question benchmark it
+   * rescued 1 to 2 real questions, and an off-topic question sharing one rare word with a note makes both searches
+   * agree as well.
+   */
+  agreeOverride: boolean;
   earlyExit: boolean;
+  /**
+   * Rerank each list's first pick wherever fusion put it. Off, with floor 0.05 and minKeep 0, reproduces 0.4.0's
+   * ranking, which only reranked the top `rerankN` (except that a note with no sections no longer reaches the reranker).
+   */
+  firstPicks: boolean;
   aliases: Record<string, string>;
+  /** The link graph: how links are weighted, and whether linked sections join the reranker shortlist. */
+  graph: GraphConfig;
 }
 
 export const DENSE_DEFAULTS: DenseConfig = {
+  graph: GRAPH_DEFAULTS,
   hybrid: true,
   embedModel: "Xenova/bge-small-en-v1.5",
   rerankModel: "Xenova/bge-reranker-base",
@@ -39,9 +59,14 @@ export const DENSE_DEFAULTS: DenseConfig = {
   rerankN: 16,
   rerankMaxLen: 384,
   blend: 0.2,
+  // Used for a reranker without a calibrated floor (RERANK_FLOORS); an explicit `retrieval.floor` always wins.
   floor: 0.05,
+  goodAt: 0.3,
   keepRatio: 0.3,
+  minKeep: 5,
+  agreeOverride: false,
   earlyExit: true,
+  firstPicks: true,
   // Generic shorthands only. Put your own (project nicknames, people, places) under
   // `retrieval.aliases` in brain.config.json; they are merged on top of these.
   aliases: {
@@ -57,6 +82,24 @@ export const DENSE_DEFAULTS: DenseConfig = {
     sysdesign: "system design",
   },
 };
+
+/**
+ * "Nothing relevant" floors per reranker, measured on questions the vault cannot answer (2026-10-18: the example
+ * vault's and a 35-question personal vault's off-topic sets). Each sits above the highest best-probability any
+ * off-topic question reached with that model, and well below most real questions: the two models score on very
+ * different scales. ms-marco-MiniLM: off-topic at most 2e-4, so 0.001. bge-reranker-base: off-topic up to 0.013
+ * ("capital of france"), so 0.02. Near-miss questions (the vault holds related notes but not the answer) score like
+ * real ones under both and cannot be told apart by a floor.
+ */
+export const RERANK_FLOORS: Record<string, number> = {
+  "Xenova/bge-reranker-base": 0.02,
+  "Xenova/ms-marco-MiniLM-L-6-v2": 0.001,
+};
+
+/** The floor for a reranker model: its calibrated value, else the generic default. */
+export function floorFor(model: string): number {
+  return RERANK_FLOORS[model] ?? DENSE_DEFAULTS.floor;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS section_vectors (
@@ -245,8 +288,12 @@ export class DenseIndex {
   }
 
   // ------------------------------------------------------------ queries
-  /** Cosine top-k over every embedded section. Brute force: a few thousand dot products is well under a millisecond. */
-  async search(query: string, k = 40): Promise<DenseHit[]> {
+  /**
+   * Cosine of the query against every embedded section, best first; ties go to the lower note id, then the lower
+   * ordinal, so the order is the same on every machine. Brute force: a few thousand dot products is well under a
+   * millisecond.
+   */
+  async scoreAll(query: string): Promise<DenseHit[]> {
     if (!(await this.ready())) return [];
     this.loadMatrix();
     if (!this.keys.length) return [];
@@ -260,8 +307,16 @@ export class DenseIndex {
       for (let j = 0; j < d; j++) s += this.mat[o + j] * q[j];
       scores[i] = s;
     }
-    const idx = Array.from(scores.keys()).sort((a, b) => scores[b] - scores[a]).slice(0, k);
-    return idx.map((i) => ({ ...this.keys[i], score: scores[i] }));
+    const keys = this.keys;
+    const idx = Array.from(scores.keys()).sort(
+      (a, b) => scores[b] - scores[a] || (keys[a].note_id < keys[b].note_id ? -1 : keys[a].note_id > keys[b].note_id ? 1 : keys[a].ord - keys[b].ord),
+    );
+    return idx.map((i) => ({ ...keys[i], score: scores[i] }));
+  }
+
+  /** Cosine top-k over every embedded section (see scoreAll for the order). */
+  async search(query: string, k = 40): Promise<DenseHit[]> {
+    return (await this.scoreAll(query)).slice(0, k);
   }
 
   /** Cross-encoder probabilities for (query, passage) pairs, in input order. */

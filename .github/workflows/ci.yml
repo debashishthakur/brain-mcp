@@ -53,10 +53,18 @@ jobs:
         run: node scripts/verify-oauth.mjs
       - name: Hybrid retrieval (models, refusal, spelling, identifiers)
         run: node scripts/verify-hybrid.mjs
+      - name: Ranker with stand-in models (empty shortlist, notes without sections, agreeOverride, link graph)
+        run: node scripts/verify-ranking.mjs
+      - name: Private notes stay out of ranking, search, context and links
+        run: node scripts/verify-policy.mjs
+      - name: Link graph (link kinds, target resolution, window cuts)
+        run: node scripts/verify-graph.mjs
+      - name: Unlinked mentions in write replies
+        run: node scripts/verify-mentions.mjs
       - name: Retrieval eval, keyword vs hybrid
         run: node scripts/eval-retrieval.mjs
-      - name: Hard eval set
-        run: node scripts/eval-hybrid.mjs
+      - name: Hard eval set (fails if two runs disagree or the reranker pair count changes)
+        run: node scripts/eval-hybrid.mjs --repeat 2
       - name: Vault is restored
         run: git diff --exit-code -- example-vault
 

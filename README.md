@@ -74,8 +74,9 @@ flowchart LR
    - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
+   - **Follow links** (off by default, `retrieval.graph`): a section of a note linked with the top hits can take a reranker place from the weakest fused entry it beats, and the reranker reads the sentence that links them. A section the last step would trim is kept anyway when it is linked with a kept hit.
    - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`), always including each list's first pick, so fusion cannot bury a hit only one search found. When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
-   - **Decide:** if even the best passage scores below a floor, answer "nothing relevant"; otherwise return the strong hits, cited by note, with a coverage label (good, thin, none).
+   - **Decide:** if even the best passage scores below the reranker's floor, answer "nothing relevant"; otherwise return the strong hits and at least the five best, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
 4. **Remember and write.** `brain_remember` appends durable facts and refuses near duplicates. A fact can replace an earlier one, expire, or start at a given date; `brain_identity` serves only the facts true now, and `brain_facts` keeps the history. Four more tools write, edit, move and delete hand-written notes, inside the folders you allow.
 
@@ -117,7 +118,7 @@ Everything runs on your machine: the models are downloaded once into `data/model
 | `brain_project` | Briefing on a project: description, latest progress, decisions, recent changes and notes grouped by type. With no argument it lists projects. |
 | `brain_graph` | Links out, backlinks grouped by project, and notes that share topics. |
 | `brain_recent` | Notes modified in the last N days, newest first. |
-| `brain_capture` | Writes a new note with graph-ready frontmatter into the capture folder. |
+| `brain_capture` | Writes a new note with graph-ready frontmatter into the capture folder. Like `brain_write` and `brain_edit`, its reply lists existing notes the text names without linking, so the caller can link them in the sentence that says how they relate. |
 | `brain_remember` | Appends a fact to the memory file; it joins `brain_identity` straight away. `replaces` names facts it makes outdated, `subject` + `attribute` replace the previous fact with the same pair on their own, and `valid_from` / `valid_until` bound when it holds. Near duplicates of current facts are refused (token Jaccard ≥ 0.6 or containment ≥ 0.85); a partial overlap in the same category is held back until the caller passes `replaces` or `force=true`. |
 | `brain_facts` | Captured facts and when each was true: the current ones, the ones true at an `as_of` date, or every version with what replaced it (`history`). Filters by `subject`, `category` and words. |
 | `brain_write` | Creates a note at a chosen path in a writable folder (`Notes/` and the capture folder by default), or replaces one with `overwrite=true`. A `hub` note groups every note whose `project` matches its title. |
@@ -204,12 +205,17 @@ node scripts/verify-memory.mjs   # brain_remember dedupe and replacements, brain
 node scripts/verify-write.mjs    # write, edit, move and delete on a throwaway vault
 node scripts/verify-oauth.mjs    # the full OAuth 2.1 flow against a throwaway auth database
 node scripts/verify-hybrid.mjs   # hybrid search: refusal, spelling, identifiers, context
+node scripts/verify-ranking.mjs  # the ranker with stand-in models: empty shortlist, notes without sections, agreeOverride, the link graph
+node scripts/verify-policy.mjs   # notes a connection may not read never rank, appear or get named in a links line
+node scripts/verify-graph.mjs    # link kinds, every way of writing a link target, duplicate names, the window each link sits in
+node scripts/verify-mentions.mjs # write replies name existing notes mentioned without a link, never private or already-linked ones
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
-node scripts/eval-hybrid.mjs     # 15 harder questions: paraphrase, typo, identifier, date, multi-hop, alias, off-topic
-node scripts/debug-rank.mjs "your question"   # trace one query through every ranking step
+node scripts/eval-hybrid.mjs     # 29 harder questions: paraphrase, typo, identifier, date, two-note, alias, off-topic
+node scripts/debug-rank.mjs "your question"   # trace one query: each list, the reranker shortlist and why entries were cut
+node scripts/graph-stats.mjs     # your link graph: links by where they sit, links written between content notes, unresolved names
 ```
 
 If `npm install` reports held-back install scripts, the two packages that need them (`better-sqlite3` and `esbuild`) are already listed under `allowScripts` in `package.json`. Run `npm install-scripts approve better-sqlite3 esbuild` if your npm still asks. The scripts of `onnxruntime-node` and `protobufjs` are not needed for CPU use.
@@ -242,14 +248,16 @@ Two scripts score retrieval on the example vault, keyword and hybrid side by sid
 | Keyword only | 42% | 100% | 100% | 2 ms |
 | Hybrid (default) | **83%** | 100% | 100% | about 1.1 s |
 
-**`eval-hybrid.mjs`**, 15 harder questions:
+**`eval-hybrid.mjs`**, 29 harder questions, 11 of them needing two notes and 7 off-topic:
 
-| Ranker | Right note first | Right note in top 5 | Off-topic questions refused |
-| --- | --- | --- | --- |
-| Keyword only | 67% | 100% | 2 of 3 |
-| Hybrid (default) | 67% | 75% | **3 of 3** |
+| Ranker | Right note first | Right note in top 5 | Off-topic questions refused | Two-note questions with both notes in the context pack |
+| --- | --- | --- | --- | --- |
+| Keyword only | 77% | 100% | 2 of 7 | – |
+| Hybrid (default) | 73% | 86% | **6 of 7** | 9 of 11 |
 
-Hybrid search puts the right note first far more often and refuses questions the vault cannot answer. Its weak spot is paraphrase: on the harder set it still misses some real questions asked in other words, such as "why is the bird audio never sent to an online service". Calibrating the "nothing relevant" floor is [issue #3](https://github.com/debashishthakur/brain-mcp/issues/3), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10). When you point the server at your own vault, replace the cases with questions about your notes.
+The script follows every note an answer needs through the ranker. On this vault all of them reach the reranker's shortlist; what used to lose them was the last step, which trimmed the second note of a two-note answer and refused some real questions. Two settings fix most of that: a "nothing relevant" floor calibrated per reranker model (`bge-reranker-base` 0.02, `ms-marco-MiniLM` 0.001; the two score on very different scales), and keeping at least the five best hits (`minKeep`). Before them the same set scored 82% in the top 5 and 7 of 11. A third, `agreeOverride`, is off: answering instead of refusing when keyword and meaning search put the same section first rescues the money-tracker paraphrase here, but also answers off-topic questions that share one rare word with a note, such as "python snake species in india". The off-topic question still answered, "which of Ines's projects runs on Kubernetes", is a near miss: the vault holds related notes, so no floor can tell it apart from a real question. Paraphrase is still the weak spot ([issue #3](https://github.com/debashishthakur/brain-mcp/issues/3)), and a faster reranker is [issue #10](https://github.com/debashishthakur/brain-mcp/issues/10).
+
+To score your own vault, write cases with the notes each answer needs (`required`) and the sentences that prove it (`evidence`: a list of groups, each holding alternative spans of which one must be in the context pack), then run `node scripts/eval-hybrid.mjs --config <your config> --cases <your cases>`. `--set key=value` tries another setting (`--set rerankN=8`), `--sweep key=a,b,c` compares several in one run, `--repeat 2` checks that two runs agree exactly, and `--json` keeps every result.
 
 ## Use your own vault
 
@@ -288,7 +296,7 @@ Any Markdown file in the vault is indexed. Frontmatter makes it richer:
 | `modified` | Date used for recency, `brain_recent` and the identity focus list. Falls back to the file's mtime. |
 | `note-count`, `last-touched` | Shown next to each hub in the identity bundle. |
 
-Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`) become graph edges. A leading `# Title` that repeats the title is dropped from what clients read, and a generated `## Connections` trailer after a `---` rule is left out of search and context.
+Wikilinks in the body (`[[Note]]`, `[[Note#Heading]]`, `[[Note|alias]]`, `[[Folder/Note]]`) and in frontmatter become graph edges. Each link is recorded with where it sits, because that says how much the author meant it: inside a sentence, in a list item that explains it, as a bare list entry, in a heading or table, in frontmatter, or in a generated `## Connections` trailer. Links inside code and embeds of images or other attachments are not links. A target resolves by path (or its end, as in `[[Notes/Plan]]`), title, file name or alias, ignoring case, `.md`, extra whitespace, and hyphens or underscores versus spaces; when several notes share a name, the one in the linking note's folder wins, then the shortest path. `brain_graph`, the links line of `brain_read` and the warnings of `brain_move` and `brain_delete` all follow these rules. In frontmatter, `project`, `topics`, `related` and `part-of` are links for every tool, plain names included; a `[[link]]` under any other key counts for the link graph only. A link's strength weighs where it sits, whether it is repeated or written both ways, and how many notes link to its target (a hub linked from everywhere says little); those counts include every note, private ones too, like the word statistics of keyword search, and reveal no note or text. A leading `# Title` that repeats the title is dropped from what clients read, and a generated `## Connections` trailer after a `---` rule is left out of search and context.
 
 </details>
 
@@ -353,7 +361,7 @@ The index derives a `facts` table from these lines whenever the file changes, an
 | `privateProjects`, `privatePaths` | Project names and globs that need the `brain:private` scope. |
 | `context.*` | `brain_context` budget, per-section cap, sections per note and candidate pool sizes. |
 | `identity.*` | Profile note, memory and skills projects, focus window and size caps. |
-| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"), `keepRatio`, `earlyExit`, and `aliases` for your own shorthands. Every field is optional. |
+| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `firstPicks` (also rerank each search's own best hit), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"; calibrated per reranker model unless you set it), `goodAt` (coverage "good" from here up), `keepRatio`, `minKeep` (always keep this many hits), `agreeOverride` (off; on, no refusal when keyword and meaning search put the same section first), `earlyExit`, `aliases` for your own shorthands, and `graph`, the link graph in ranking: `enabled` (off), `slots` (most reranker places linked sections may take, a ceiling), `seeds`, `linksPerSeed`, `minWeight`, `swapWeight` (above 1 forces linked sections in, for experiments), `prefix` (show the linking sentence), `keepLinked` and `keepMinWeight` (keep a trimmed section linked with a kept hit), and the link weights `kinds` and `keys`. `BRAIN_MCP_GRAPH=0` or `1` and `BRAIN_MCP_GRAPH_SLOTS` override. Every field is optional. |
 | `writableDirs` | Folders the write, edit, move and delete tools may change. Default: the capture folder and `Notes`. |
 | `http.*` | Host, port and path for HTTP modes. The shipped config uses `127.0.0.1:3737/mcp`. |
 | `auth.*` | Mode, public URL, token lifetimes, lockout policy and default scopes for OAuth. |
@@ -512,7 +520,7 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 
 Each of these is an open issue with a suggested approach and a definition of done:
 
-- **When should retrieval abstain?** Hybrid search refuses all off-topic questions, but also some real ones. Calibrating the floor is open. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
+- **When should retrieval abstain?** The floor is now calibrated per reranker and refuses plainly off-topic questions. Near misses, where the vault holds related notes but not the answer, still score like real questions: telling them apart needs a check that a passage actually answers the question. ([#3](https://github.com/debashishthakur/brain-mcp/issues/3))
 - **Which reranker gives the best accuracy per millisecond on a CPU?** A model six times faster finds the right note in 58% of everyday questions instead of 75%. ([#10](https://github.com/debashishthakur/brain-mcp/issues/10))
 - **Can the graph a vault already has replace an LLM-built one** for multi-hop questions? ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
 - **How should AI memory notice that a fact changed?** The memory file now records replacements and expiry, and `brain_facts` answers what was true when. A change the caller does not name is only caught by word overlap within one category; catching it by meaning is open. ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))

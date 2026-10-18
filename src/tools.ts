@@ -153,7 +153,7 @@ export function createBrainServer(d: Deps): McpServer {
       const p = principalOf(extra as Extra, d);
       return audit.run("brain_context", p, args, async () => {
         const r = await buildContextHybrid(cfg, index, policy, p, args.question, { project: args.project, budgetChars: args.budget_chars });
-        return { result: text(r.text), notes: r.notes };
+        return { result: text(r.text), notes: r.notes, meta: { coverage: r.coverage, rank: r.stats } };
       });
     },
   );
@@ -178,16 +178,27 @@ export function createBrainServer(d: Deps): McpServer {
     async (args, extra) => {
       const p = principalOf(extra as Extra, d);
       return audit.run("brain_search", p, args, async () => {
-        const { hits, coverage, corrections } = await index.searchHybrid(args.query, { project: args.project, type: args.type, topic: args.topic, since: args.since, limit: args.limit * 2 });
+        const { hits, coverage, corrections, stats } = await index.searchHybrid(args.query, {
+          project: args.project,
+          type: args.type,
+          topic: args.topic,
+          since: args.since,
+          limit: args.limit * 2,
+          readable: (n) => policy.canRead(n, p),
+        });
         const visible = hits.filter((h) => policy.canRead({ id: h.id, project: h.project, visibility: index.get(h.id)?.visibility ?? null }, p)).slice(0, args.limit);
         const spelling = corrections.length ? ` (spelling read as ${corrections.join(", ")})` : "";
         if (!visible.length) {
           const why = coverage === "none" ? "The vault does not record this; say so rather than guessing." : "Try fewer or different keywords, or drop the filters.";
-          return { result: text(`No notes matched "${args.query}"${spelling}. Coverage: ${coverage}. ${why}`), notes: [] };
+          return { result: text(`No notes matched "${args.query}"${spelling}. Coverage: ${coverage}. ${why}`), notes: [], meta: { coverage, rank: stats } };
         }
         const caveat = coverage === "thin" ? " The best match is weak; treat it as partial evidence." : "";
         const lines = visible.map((h) => `- **${h.title}** \`${h.id}\` — ${h.type}${h.project ? ` · ${h.project}` : ""} · ${h.modified}\n  ${policy.redact(h.snippet.replace(/\s+/g, " ")).text}`);
-        return { result: text(`${visible.length} hit(s) for "${args.query}"${spelling}. Coverage: ${coverage}.${caveat}\n\n${lines.join("\n")}`), notes: visible.map((h) => h.id) };
+        return {
+          result: text(`${visible.length} hit(s) for "${args.query}"${spelling}. Coverage: ${coverage}.${caveat}\n\n${lines.join("\n")}`),
+          notes: visible.map((h) => h.id),
+          meta: { coverage, rank: stats },
+        };
       });
     },
   );
@@ -218,7 +229,12 @@ export function createBrainServer(d: Deps): McpServer {
         }
         const r = policy.redact(body.trim());
         const out = n.project ? [n.project] : [];
-        const related = index.outgoing(n.id).filter((l) => l.note && l.note.id !== n.id).map((l) => l.note!.title).filter((t) => !out.includes(t));
+        // Only notes this caller may read: a private note's title must not leak through someone else's links.
+        const related = index
+          .outgoing(n.id)
+          .filter((l) => l.note && l.note.id !== n.id && policy.canRead(l.note, p))
+          .map((l) => l.note!.title)
+          .filter((t) => !out.includes(t));
         const header = `# ${n.title}\n\`${n.id}\` · ${meta(n, index)}${related.length ? `\nlinks: ${[...new Set(related)].slice(0, 25).join(", ")}` : ""}\n\n`;
         return { result: text(header + r.text), notes: [n.id], redactions: r.count };
       });
@@ -293,7 +309,8 @@ export function createBrainServer(d: Deps): McpServer {
       return audit.run("brain_graph", p, args, () => {
         const n = index.resolve(args.note);
         if (!n || !policy.canRead(n, p)) return { result: fail(`No readable note matches "${args.note}".`), notes: [] };
-        const out = index.outgoing(n.id).filter((l) => l.note && l.note.id !== n.id && policy.canRead(l.note, p));
+        // One row per linked note, however many names the note links it by.
+        const out = [...new Map(index.outgoing(n.id).filter((l) => l.note && l.note.id !== n.id && policy.canRead(l.note, p)).map((l) => [l.note!.id, l])).values()];
         const back = readable(index.backlinks(n.id, args.limit), p);
         const shared = index.sharedTopicNeighbours(n.id, args.limit).filter((s) => policy.canRead(s.note, p));
         const parts = [`# ${n.title}\n\`${n.id}\` · ${meta(n, index)}\n`];
@@ -347,15 +364,38 @@ export function createBrainServer(d: Deps): McpServer {
     return abs;
   };
 
+  /** Existing notes the new text names without linking, as a hint appended to a write tool's reply ("" if none). */
+  const mentionHint = (written: string, selfId: string, p: Principal): string => {
+    const found = index.unlinkedMentions(written, selfId, (n) => policy.canRead(n, p));
+    if (!found.length) return "";
+    // A title with # | ^ [ ] would be read as another link target: such a note is linked by its path, or left out
+    // when the path has them too.
+    const special = /[#|^[\]]/;
+    const link = (m: { id: string; title: string }) => {
+      if (!special.test(m.title)) return `[[${m.title}]]`;
+      const p = m.id.replace(/\.md$/i, "");
+      return special.test(p) ? null : `[[${p}|${m.title.replace(/[|[\]]/g, "")}]]`;
+    };
+    const lines = found.flatMap((m) => {
+      const l = link(m);
+      return l ? [`- "${m.name}" → ${l}: "${policy.redact(m.snippet).text}"`] : [];
+    });
+    if (!lines.length) return "";
+    return `\n\nUnlinked mentions of existing notes. Where the sentence says how they relate, link the first mention there with brain_edit; leave passing mentions alone:\n${lines.join("\n")}`;
+  };
+
   server.registerTool(
     "brain_capture",
     {
       title: "Save a durable note",
       description:
-        "Write a new note into the vault's capture folder with graph-ready frontmatter. Use for plans, decisions, ideas, meeting notes, or session logs the owner wants to keep. Not for one-line facts (use brain_remember).",
+        "Write a new note into the vault's capture folder with graph-ready frontmatter. Use for plans, decisions, ideas, meeting notes, or session logs the owner wants to keep. Not for one-line facts (use brain_remember). The reply lists existing notes the body names without linking.",
       inputSchema: {
         title: z.string().min(3).max(140).describe("Specific noun phrase, not a filename"),
-        body: z.string().min(1).describe("Markdown body. Link concepts inline with [[Concept]] on first mention."),
+        body: z
+          .string()
+          .min(1)
+          .describe("Markdown body. Link related notes inside the sentence that says how they relate, e.g. 'The restore steps are in [[Restore the ledger database]]'; a bare list of links carries little weight."),
         kind: z.enum(["note", "idea", "decision", "plan", "log", "research"]).optional().default("note"),
         project: z.string().optional().describe("Project hub name this belongs to, e.g. 'Website Redesign'"),
         topics: z.array(z.string()).max(8).optional().describe("Concept names, e.g. ['OAuth', 'RAG']"),
@@ -389,7 +429,7 @@ export function createBrainServer(d: Deps): McpServer {
         ];
         const content = fmLines.join("\n") + `# ${args.title}\n\n${args.body.trim()}\n`;
         writeCaptured(rel, content);
-        return { result: text(`Saved \`${rel}\`.${warn}`), notes: [rel] };
+        return { result: text(`Saved \`${rel}\`.${warn}${mentionHint(args.body, rel, p)}`), notes: [rel] };
       });
     },
   );
@@ -480,7 +520,7 @@ export function createBrainServer(d: Deps): McpServer {
 
         // Related generated memory notes, for the caller's awareness only.
         const related = index
-          .search(args.fact, { project: cfg.identity.memoryProject, limit: 3 })
+          .search(args.fact, { project: cfg.identity.memoryProject, limit: 3, readable: (n) => policy.canRead(n, p) })
           .filter((h) => h.id !== cfg.memoryFile)
           .map((h) => h.title);
         existing = existing.replace(/^modified: .*$/m, `modified: ${today()}`);
@@ -614,16 +654,17 @@ export function createBrainServer(d: Deps): McpServer {
   };
   /** A note the caller names by id, title or [[wikilink|alias]], checked for write access. */
   const writableNote = (ref: string, p: Principal): { note: NoteRow; abs: string; rel: string } => {
-    const note = index.resolve(ref.replace(/\|[^\]]*/, ""));
+    const note = index.resolve(ref.replace(/\|[^\]]*/, ""), false);
     if (!note || !policy.canRead(note, p)) throw new Error(`Note not found: ${ref}`);
     return { note, ...writable(note.id) };
   };
   /** Record the links that resolve to a note now; the returned check, run after the note moved or went,
-   *  reports only those that no longer resolve (a same-titled note or a kept title can still catch them). */
-  const linksInto = (id: string) => {
-    const refs = index.backlinks(id, 50).flatMap((n) => index.outgoing(n.id).filter((o) => o.note?.id === id).map((o) => ({ from: n.id, target: o.target })));
+   *  reports only those that no longer resolve (a same-titled note or a kept title can still catch them).
+   *  Only notes the caller may read are named: a private note must not show up through the links it makes. */
+  const linksInto = (id: string, p: Principal) => {
+    const refs = readable(index.backlinks(id, 50), p).flatMap((n) => index.outgoing(n.id).filter((o) => o.note?.id === id).map((o) => ({ from: n.id, target: o.target })));
     return () => {
-      const broken = [...new Set(refs.filter((r) => !index.resolve(r.target)).map((r) => r.from))];
+      const broken = [...new Set(refs.filter((r) => !index.resolveLink(r.from, r.target)).map((r) => r.from))];
       return broken.length ? `\n\n${broken.length} note(s) now have links that resolve to nothing: ${broken.slice(0, 5).map((b) => `\`${b}\``).join(", ")}.` : "";
     };
   };
@@ -642,11 +683,11 @@ export function createBrainServer(d: Deps): McpServer {
     {
       title: "Create or replace a hand-written note",
       description:
-        "Create a note at a path you choose under Notes/ or Captures/, or replace one there with overwrite=true. Use it for hubs, guides and runbooks maintained by hand. Unlike brain_capture you set the type, including 'hub': a hub groups every note whose frontmatter project matches its title. Generated notes elsewhere in the vault cannot be written.",
+        "Create a note at a path you choose under Notes/ or Captures/, or replace one there with overwrite=true. Use it for hubs, guides and runbooks maintained by hand. Unlike brain_capture you set the type, including 'hub': a hub groups every note whose frontmatter project matches its title. Generated notes elsewhere in the vault cannot be written. The reply lists existing notes the body names without linking.",
       inputSchema: {
         path: z.string().min(4).max(240).describe("Vault path, e.g. 'Notes/Harbor Ledger.md'"),
         title: z.string().min(1).max(140),
-        body: z.string().min(1).describe("Markdown body, without frontmatter or the # title heading"),
+        body: z.string().min(1).describe("Markdown body, without frontmatter or the # title heading. Link related notes inside the sentence that says how they relate."),
         type: z.string().regex(/^[a-z][a-z-]{1,23}$/).optional().default("note").describe("note, hub, moc, guide, runbook, plan, decision, ..."),
         project: z.string().optional().describe("Hub this note belongs to, e.g. 'Harbor Ledger'"),
         topics: z.array(z.string()).max(8).optional().describe("Concept names, e.g. ['OAuth', 'RAG']"),
@@ -687,11 +728,11 @@ export function createBrainServer(d: Deps): McpServer {
         const notes: string[] = [];
         if (args.type === "hub") {
           notes.push(`Hub "${args.title}" now groups every note whose frontmatter project is [[${args.title}]].`);
-          const twin = index.hubs().find((h) => h.title.toLowerCase() === args.title.toLowerCase() && h.id !== rel);
+          const twin = readable(index.hubs(), p).find((h) => h.title.toLowerCase() === args.title.toLowerCase() && h.id !== rel);
           if (twin) notes.push(`Another hub with this title exists at \`${twin.id}\`; remove one of them.`);
         }
         if (args.project && !projectHub) notes.push(`No hub named "${args.project}" exists yet; the project link stays unresolved until one does.`);
-        return { result: text(`${exists ? "Replaced" : "Created"} \`${rel}\`.${notes.length ? "\n\n" + notes.join("\n") : ""}`), notes: [rel] };
+        return { result: text(`${exists ? "Replaced" : "Created"} \`${rel}\`.${notes.length ? "\n\n" + notes.join("\n") : ""}${mentionHint(args.body, rel, p)}`), notes: [rel] };
       });
     },
   );
@@ -701,7 +742,7 @@ export function createBrainServer(d: Deps): McpServer {
     {
       title: "Edit part of a hand-written note",
       description:
-        "Change part of a note under Notes/ or Captures/ without rewriting it. Give exactly one of: old_text + new_text (old_text must occur exactly once; new_text may be empty), section + content (replaces everything under that heading up to the next heading of the same or higher level; the heading itself stays), or append. Generated notes and the memory file cannot be edited.",
+        "Change part of a note under Notes/ or Captures/ without rewriting it. Give exactly one of: old_text + new_text (old_text must occur exactly once; new_text may be empty), section + content (replaces everything under that heading up to the next heading of the same or higher level; the heading itself stays), or append. Generated notes and the memory file cannot be edited. The reply lists existing notes the new text names without linking.",
       inputSchema: {
         note: z.string().min(1).describe("Note id (vault path), title or [[wikilink]]"),
         old_text: z.string().min(1).optional().describe("Exact text to replace; must occur exactly once"),
@@ -738,7 +779,9 @@ export function createBrainServer(d: Deps): McpServer {
         out = out.replace(/^modified: .*$/m, `modified: ${today()}`);
         fs.writeFileSync(abs, out.replace(/\n/g, eol), "utf8");
         index.upsertFile(abs);
-        return { result: text(`Edited \`${rel}\`.`), notes: [rel] };
+        // Only the new text: mentions that were already there are not reported again on every edit.
+        const added = args.new_text ?? args.content ?? args.append ?? "";
+        return { result: text(`Edited \`${rel}\`.${mentionHint(added, rel, p)}`), notes: [rel] };
       });
     },
   );
@@ -761,7 +804,7 @@ export function createBrainServer(d: Deps): McpServer {
         const from = writableNote(args.note, p);
         const to = writable(args.to);
         if (fs.existsSync(to.abs)) return { result: fail(`\`${to.rel}\` already exists.`), notes: [from.rel] };
-        const brokenAfter = linksInto(from.note.id);
+        const brokenAfter = linksInto(from.note.id, p);
         fs.mkdirSync(path.dirname(to.abs), { recursive: true });
         fs.renameSync(from.abs, to.abs);
         index.upsertFile(from.abs);
@@ -786,7 +829,7 @@ export function createBrainServer(d: Deps): McpServer {
       const p = principalOf(extra as Extra, d);
       return guardedWrite("brain_delete", p, args, () => {
         const { note, abs, rel } = writableNote(args.note, p);
-        const brokenAfter = linksInto(note.id);
+        const brokenAfter = linksInto(note.id, p);
         const trashRel = `.trash/${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)} ${path.posix.basename(rel)}`;
         const trashAbs = path.join(cfg.vaultDir, trashRel);
         fs.mkdirSync(path.dirname(trashAbs), { recursive: true });

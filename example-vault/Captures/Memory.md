@@ -25,7 +25,7 @@ Use uv for Python virtual environments and pnpm for Node packages in Ines's own 
 
 ## 2026-09-21 08:05 · project
 
-Kestrel detections older than 18 months are archived to Parquet files on the home server, not deleted.
+Kestrel detections older than 18 months are archived to Parquet files on the home server ([[Home server facts]]), not deleted.
 
 **Why:** Year-on-year comparisons of spring arrivals need the old rows.
 
