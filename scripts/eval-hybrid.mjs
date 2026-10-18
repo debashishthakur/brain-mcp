@@ -33,6 +33,7 @@ import { VaultIndex } from "../dist/vault/index.js";
 import { buildContextHybrid, packSections } from "../dist/context.js";
 import { ALL_SCOPES, Policy } from "../dist/policy.js";
 import { floorFor } from "../dist/vault/dense.js";
+import { clampGraph } from "../dist/vault/graph.js";
 
 // ---------------------------------------------------------------- options
 const argv = process.argv.slice(2);
@@ -115,6 +116,9 @@ for (const s of opt.set) {
   const eq = s.indexOf("=");
   setPath(cfg, s.slice(0, eq), parseValue(s.slice(eq + 1)));
 }
+// retrieval.graph as the config loader leaves it: a boolean or a partial object becomes the full settings.
+const normGraph = () => (cfg.retrieval.graph = clampGraph(cfg.retrieval.graph));
+normGraph();
 // A --set rerankModel takes that model's calibrated floor, as the config loader would, unless a floor is set too.
 const rawCfg = JSON.parse(fs.readFileSync(cfg.configPath, "utf8"));
 const setKeys = opt.set.map((s) => retrievalKey(s.slice(0, s.indexOf("="))));
@@ -133,8 +137,8 @@ if (index.dense) {
 const nSections = index.db.prepare("SELECT COUNT(*) c FROM sections").get().c;
 const rc = cfg.retrieval;
 const graphSettings = () => {
-  const g = rc.graph;
-  return g?.enabled
+  const g = clampGraph(rc.graph);
+  return g.enabled
     ? `graph on (slots ${g.slots}, seeds ${g.seeds}, linksPerSeed ${g.linksPerSeed}, minWeight ${g.minWeight}, swapWeight ${g.swapWeight}, prefix ${g.prefix}, keepLinked ${g.keepLinked}, keepMinWeight ${g.keepMinWeight})`
     : "graph off";
 };
@@ -235,7 +239,8 @@ function trace(note, groups, r, kept24, top5, packed, pack) {
   else if (!listed.length && !poolE.length) lost = "not found";
   else if (!poolE.length) lost = displaced ? "displaced by graph" : r.coverage === "lexical" ? "past k" : "below shortlist";
   else if (r.coverage === "none") lost = "refused";
-  else if (!kept) lost = poolE.every((p) => p.src === "graph" && p.cut === "floor") ? "graph floor" : poolE.some((p) => p.cut === "trim") ? "trimmed" : "past k";
+  else if (!kept)
+    lost = poolE.every((p) => p.cut === "floor") ? (poolE.every((p) => p.src === "graph") ? "graph floor" : "not the agreed note") : poolE.some((p) => p.cut === "trim") ? "trimmed" : "past k";
   else if (!packed_) lost = "not packed";
   return {
     note,
@@ -276,7 +281,8 @@ async function hybridPass() {
       // Models off: brain_context answers from the keyword pipeline, not from these sections.
       const lx = await buildContextHybrid(cfg, index, policy, owner, c.q);
       pack = lx.notes;
-      packText = lx.text;
+      // The packed notes only, as the benchmark reads a pack: not the echoed question or the source list above them.
+      packText = lx.text.split(/\n---\n(?=## \[\d+\] )/).slice(1).join("\n");
       packed = null;
     }
     const need = c.required.map((note) => trace(note, c.evidence, r, kept24, top5, packed, pack));
@@ -429,17 +435,21 @@ let sweepErrors = 0;
 if (opt.sweep) {
   const eq = opt.sweep.indexOf("=");
   const key = opt.sweep.slice(0, eq);
-  if (["rerankModel", "embedModel"].includes(retrievalKey(key))) {
-    console.error(`--sweep cannot change ${key}: the models load once per process; use --set in separate runs`);
+  // These are read once, when the models load or the sections are embedded: a sweep would keep the first value.
+  if (["rerankModel", "embedModel", "embedChars", "hybrid"].includes(retrievalKey(key))) {
+    console.error(`--sweep cannot change ${key}: it is read once per process; use --set in separate runs`);
     process.exit(2);
   }
   for (const v of opt.sweep.slice(eq + 1).split(",")) {
     setPath(cfg, key, parseValue(v));
+    normGraph();
+    // Link weights and shorthands are read when the graph is built: rebuild it for each value.
+    index.graph.markDirty();
     const rows = await runVariant(`${key}=${v}`);
     if (variants.length > 1) {
       const d = diffLine(variants[0].rows, rows);
       // A graph setting must never cost reranker pairs or answer off-topic questions it refused before.
-      if (key.startsWith("retrieval.graph.") && (d.pairs > 1e-9 || d.offTopic < 0)) {
+      if (/^(retrieval\.)?graph\b/.test(key) && (d.pairs > 1e-9 || d.offTopic < 0)) {
         sweepErrors++;
         console.log(`  GRAPH SWEEP: ${d.pairs > 1e-9 ? "pairs per question rose" : "fewer off-topic questions refused"}`);
       }

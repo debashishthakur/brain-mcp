@@ -116,7 +116,8 @@ const R = "Notes/Retention policy.md";
 const L = "Notes/Linker.md";
 const M = "Notes/Ledger member.md";
 const HUB = "Hubs/Ledger hub.md";
-gput(S, lnote("Ledger backups", "The ledger backup schedule runs nightly. The restore steps for the ledger live in [[Restore runbook]] and nowhere else.\n\n## Retention\n\nOld copies are pruned; see the [[Backups]] concept, the [[Vault keys]] and the [[Off note]] for more on this.", 'related: ["[[Retention policy]]"]\n'));
+gput("Concepts/Restore.md", `---\ntitle: "Restore"\ntype: concept\n---\n# Restore\n\nA concept page.\n`);
+gput(S, lnote("Ledger backups", "The ledger backup schedule runs nightly. The restore steps for the ledger live in [[Restore runbook]] and nowhere else. The general idea is on the [[Restore]] page.\n\n## Retention\n\nOld copies are pruned; see the [[Backups]] concept, the [[Vault keys]] and the [[Off note]] for more on this.", 'related: ["[[Retention policy]]"]\n'));
 gput(T, `---\ntitle: "Restore runbook"\ntype: runbook\n---\n# Restore runbook\n\nStop the importer, load the dump, start it again.\n`);
 gput(R, `---\ntitle: "Retention policy"\ntype: note\n---\n# Retention policy\n\nCopies older than ninety days are pruned.\n`);
 gput(L, lnote("Linker", "## Intro\n\nUnrelated opening words here.\n\n## Builds\n\nThis builds on [[Ledger backups]] for the nightly restore."));
@@ -215,11 +216,24 @@ check("on the early-exit shortcut the graph adds nothing and the reranker sees 3
 gfake.cos = baseCos();
 
 // 5. structural notes: a hub or concept page may seed, but is never a linked section or a partner
+// The Restore concept page is linked from the top hit in a sentence and fits the question, but no list finds it.
+gfake.cos = { ...baseCos(), "Concepts/Restore.md": 0.45 };
+const st = await grun({}, { ...ON, swapWeight: 100, linksPerSeed: 10 });
 check(
-  "hubs and concept pages are never linked sections or partners",
-  ![forced, adm].some((r) => r.debug.pool.some((p) => (p.src === "graph" || p.partnerOf) && /^(Hubs|Concepts)\//.test(p.key))) && forced.debug.graph.candidates.some((c) => c.note === "Concepts/Backups.md" && ["structural", "listed"].includes(c.status)),
-  JSON.stringify(forced.debug.graph.candidates.filter((c) => /^(Hubs|Concepts)\//.test(c.note))),
+  "a concept page linked from a top hit is never a linked section",
+  st.debug.graph.candidates.some((c) => c.note === "Concepts/Restore.md" && c.status === "structural") && !st.debug.pool.some((p) => p.src === "graph" && /^(Hubs|Concepts)\//.test(p.key)),
+  JSON.stringify(st.debug.graph.candidates.filter((c) => /^(Hubs|Concepts)\//.test(c.note))),
 );
+// The hub is trimmed while a note it lists is kept: it would be that note's partner, were it not structural.
+gfake.prob = (p) => (p.startsWith("Ledger hub") || p.startsWith("Ledger member") || p.startsWith("Filler") ? 0.001 : 0.6);
+const hubTrim = await grun({ minKeep: 0 }, ON);
+check(
+  "a trimmed hub is never kept as a link partner",
+  hubTrim.debug.pool.find((p) => p.key.startsWith(HUB))?.cut === "trim" && !hubTrim.debug.pool.some((p) => p.partnerOf && /^(Hubs|Concepts)\//.test(p.key)),
+  JSON.stringify(hubTrim.debug.pool.map((p) => [p.key, p.cut, p.partnerOf ?? ""])),
+);
+gfake.cos = baseCos();
+gfake.prob = () => 0.5;
 
 // 6. privacy and filters: an unreadable note is never considered, traced or quoted; a filtered one only traced
 const pol = await grun({}, { ...ON, swapWeight: 100, linksPerSeed: 10 }, { readable: (n) => !n.id.startsWith("Private/") });
@@ -234,7 +248,7 @@ gfake.prob = (p) => (p.startsWith("Linked from") ? 0.9 : 0.001);
 const none = await grun({}, ON);
 check("a refused question stays refused, however well a linked section scores", none.coverage === "none" && none.sections.length === 0, `${none.coverage} ${none.sections.length}`);
 gfake.cos = { ...baseCos(), [`${S}#0`]: 0.99 };
-const ov = await grun({ agreeOverride: true, earlyExit: false }, on);
+const ov = await grun({ agreeOverride: true, earlyExit: false }, ON);
 check("on the agreeOverride path linked sections are cut at the floor", ov.coverage === "thin" && ov.debug.pool.filter((p) => p.src === "graph").every((p) => p.cut === "floor") && !ov.sections.some((x) => x.note_id === T), JSON.stringify({ c: ov.coverage, g: ov.debug.pool.filter((p) => p.src === "graph") }));
 gfake.cos = baseCos();
 gfake.prob = (p) => (p.startsWith("Linked from") ? 0.99 : 0.2);
@@ -250,11 +264,22 @@ check(
   fl.debug.pool.find((p) => p.src === "graph")?.cut === "floor" && fl.debug.pool.filter((p) => p.src !== "graph").every((p) => p.cut === cutsOff[p.key] || p.key === adm.debug.graph.displaced[0].key),
   JSON.stringify(fl.debug.pool.map((p) => [p.src, p.cut])),
 );
-gfake.prob = (p) => (p.startsWith("Linked from") ? 0.9 : p.startsWith("Filler") ? 0.001 : 0.6);
-const mk = await grun({}, ON);
-const keptBase = mk.debug.pool.filter((p) => p.src !== "graph" && p.cut === "kept").length;
-const keptBaseOff = (await grun()).debug.pool.filter((p) => p.cut === "kept").length;
-check("a kept linked section does not use up minKeep", keptBase >= Math.min(grc.minKeep, keptBaseOff), `${keptBase} vs ${keptBaseOff}`);
+// The lists' rows kept with the graph on are those kept with it off, minus the place a linked section took: a kept
+// linked section neither uses up minKeep (most rows are under the trim bar here) nor raises the bar (minKeep 0).
+const sameBase = async (set) => {
+  const gOn = await grun(set, { ...ON, keepLinked: 0 });
+  const gOff = await grun(set);
+  const gone = new Set(gOn.debug.graph.displaced.map((d) => d.key));
+  const keptOn = gOn.debug.pool.filter((p) => p.src !== "graph" && p.cut === "kept").map((p) => p.key).sort();
+  const keptOff = gOff.debug.pool.filter((p) => p.cut === "kept" && !gone.has(p.key)).map((p) => p.key).sort();
+  return { ok: gOn.debug.pool.some((p) => p.src === "graph" && p.cut === "kept") && JSON.stringify(keptOn) === JSON.stringify(keptOff), keptOn, keptOff };
+};
+gfake.prob = (p) => (p.startsWith("Linked from") ? 0.9 : p.startsWith("Ledger backups") || p.startsWith("Ledger hub") ? 0.6 : 0.001);
+const mk = await sameBase({});
+check("a kept linked section does not use up minKeep", mk.ok, JSON.stringify(mk));
+gfake.prob = (p) => (p.startsWith("Linked from") ? 0.99 : p.startsWith("Ledger backups") ? 0.3 : 0.05);
+const barKept = await sameBase({ minKeep: 0 });
+check("a kept linked section does not raise the trim bar", barKept.ok, JSON.stringify(barKept));
 
 // 9. the prefix: none for a frontmatter-only link, none at all with prefix off
 gfake.prob = () => 0.5;
@@ -273,11 +298,15 @@ const cap = await grun({}, { ...ON, swapWeight: 100, linksPerSeed: 1 });
 const perSeed = {};
 for (const c of cap.debug.graph.candidates.filter((c) => c.status !== "cap" && c.score !== undefined)) perSeed[c.seed] = (perSeed[c.seed] ?? 0) + 1;
 check("linksPerSeed caps the links taken from each seed", Object.values(perSeed).every((n) => n <= 1), JSON.stringify(perSeed));
+// The member note is in the shortlist and fits best; the free place must go to a note that is not.
 const noteOfKey = (k) => k.slice(0, k.lastIndexOf("#"));
+gfake.cos = { ...baseCos(), [T]: 0.01, [M]: 0.58 };
+const dup = await grun({}, { ...ON, swapWeight: 100, slots: 10, linksPerSeed: 10 });
+gfake.cos = baseCos();
 check(
   "a note already in the shortlist is never added again",
-  forced.debug.pool.some((p) => p.src === "graph") && !forced.debug.pool.some((p, i, a) => p.src === "graph" && a.some((q, j) => j !== i && noteOfKey(q.key) === noteOfKey(p.key))),
-  JSON.stringify(forced.debug.pool.map((p) => [p.src, p.key])),
+  dup.debug.pool.some((p) => p.src === "graph") && !dup.debug.pool.some((p, i, a) => p.src === "graph" && a.some((q, j) => j !== i && noteOfKey(q.key) === noteOfKey(p.key))),
+  JSON.stringify(dup.debug.pool.map((p) => [p.src, p.key])),
 );
 
 // 11. the linked keep: a trimmed section a kept hit links to is kept last

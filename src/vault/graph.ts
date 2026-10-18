@@ -58,15 +58,19 @@ export const GRAPH_DEFAULTS: GraphConfig = {
  * Graph settings within their ranges: a value that is not a finite number takes the default, others are clamped. Run
  * by the config loader and again by the ranker, since evals set values directly.
  */
-export function clampGraph(g: GraphConfig): GraphConfig {
+export function clampGraph(raw: GraphConfig | boolean | null | undefined): GraphConfig {
   const d = GRAPH_DEFAULTS;
+  const g: Partial<GraphConfig> = typeof raw === "boolean" ? { enabled: raw } : (raw ?? {});
   const num = (v: unknown, def: number, lo: number, hi: number, int = false) => {
     const n = Math.min(hi, Math.max(lo, typeof v === "number" && Number.isFinite(v) ? v : def));
     return int ? Math.round(n) : n;
   };
   return {
+    ...d,
     ...g,
-    enabled: g.enabled === true,
+    kinds: { ...d.kinds, ...(g.kinds ?? {}) },
+    keys: { ...d.keys, ...(g.keys ?? {}) },
+    enabled: g.enabled === true || g.enabled === (1 as unknown) || g.enabled === ("true" as unknown),
     slots: num(g.slots, d.slots, 0, 64, true),
     seeds: num(g.seeds, d.seeds, 1, 16, true),
     linksPerSeed: num(g.linksPerSeed, d.linksPerSeed, 1, 10, true),
@@ -221,9 +225,12 @@ export class LinkGraph {
       this.nodes.set(r.id, { id: r.id, title: r.title, type: r.type, dir: path.posix.dirname(r.id) });
       // Paths and their folder suffixes are also kept slugged, so [[Notes/github-account]] finds Notes/GitHub account.md.
       const parts = r.id.replace(/\.md$/i, "").split("/").map(nameKey);
-      for (let i = 0; i < parts.length - 1; i++) {
-        add(i === 0 ? n.path : n.suffix, parts.slice(i).join("/"), r.id);
-        add(i === 0 ? n.pathSlug : n.suffixSlug, parts.slice(i).map(slugKey).join("/"), r.id);
+      // The full path (also for a note at the vault root), then each folder suffix.
+      add(n.path, parts.join("/"), r.id);
+      add(n.pathSlug, parts.map(slugKey).join("/"), r.id);
+      for (let i = 1; i < parts.length - 1; i++) {
+        add(n.suffix, parts.slice(i).join("/"), r.id);
+        add(n.suffixSlug, parts.slice(i).map(slugKey).join("/"), r.id);
       }
       const base = nameKey(path.posix.basename(r.id, ".md"));
       add(n.title, nameKey(r.title), r.id);
@@ -241,8 +248,10 @@ export class LinkGraph {
         add(n.slug, slugKey(s), r.id);
       }
     }
+    // Own keys only, so a frontmatter key named "constructor" weighs like any other key.
+    const own = (o: Record<string, number>, k: string) => (Object.hasOwn(o, k) && typeof o[k] === "number" ? o[k] : undefined);
     const weightOf = (kind: LinkKind, fmKey: string | null) =>
-      kind === "fm" ? (this.cfg.graph.keys[fmKey ?? ""] ?? this.cfg.graph.keys["*"] ?? 0) : (this.cfg.graph.kinds[kind] ?? 0);
+      kind === "fm" ? (own(this.cfg.graph.keys, fmKey ?? "") ?? own(this.cfg.graph.keys, "*") ?? 0) : (own(this.cfg.graph.kinds, kind) ?? 0);
     const occs = this.db.prepare("SELECT from_id, pos, from_ord, kind, fm_key, target, target_heading FROM edges ORDER BY from_id, pos").all() as {
       from_id: string;
       pos: number;

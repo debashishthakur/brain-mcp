@@ -6,6 +6,7 @@ import fs from "node:fs";
 import { loadConfig } from "../dist/config.js";
 import { floorFor } from "../dist/vault/dense.js";
 import { VaultIndex } from "../dist/vault/index.js";
+import { ALL_SCOPES, Policy } from "../dist/policy.js";
 
 const argv = process.argv.slice(2);
 let configPath;
@@ -43,7 +44,10 @@ const short = (key) => {
   const [id, ord] = key.split("#");
   return `${id.split("/").pop().replace(/\.md$/, "").slice(0, 40)}#${ord}`;
 };
-const r = await index.rankSections(q, { k: 24, debug: true });
+// As the owner sees it, like brain_search and brain_context: every scope, so only denyPaths notes are hidden.
+const policy = new Policy(cfg);
+const owner = { clientId: "debug", scopes: new Set(ALL_SCOPES) };
+const r = await index.rankSections(q, { k: 24, debug: true, readable: (n) => policy.canRead(n, owner) });
 const d = r.debug;
 console.log(`\n### ${q}\nterms: ${r.terms.join(" ")}  corrections: ${r.corrections.join(",") || "-"}`);
 for (const [name, list] of Object.entries(d.lists)) if (list.length) console.log(`${name.padEnd(5)}: ${list.slice(0, 6).map(short).join(" | ")}${list.length > 6 ? ` … (${list.length})` : ""}`);
@@ -51,15 +55,15 @@ console.log(`rerank ${cfg.retrieval.rerankModel.split("/").pop()} · rerankN ${c
 console.log(`fused ${r.stats.fused} · shortlist ${r.stats.pool} · reranked ${r.stats.reranked} · best prob ${r.stats.topProb === null ? "-" : r.stats.topProb.toFixed(3)} · coverage=${r.coverage} early=${r.earlyExit} ms=${r.ms}`);
 console.log("shortlist (fused rank, source, reranker probability, blended score, cut):");
 for (const p of d.pool) {
-  const via = p.graph ? `  ← ${p.graph.dir === "out" ? "linked from" : "links to"} ${short(p.graph.seed)} (${p.graph.kind}, strength ${p.graph.strength.toFixed(2)}, fit ${p.graph.fit.toFixed(2)}${p.graph.prefixed ? ", prefixed" : ""})` : "";
-  const partner = p.partnerOf ? `  ← link partner of ${short(p.partnerOf)}` : "";
+  const via = p.graph ? `  ← ${p.graph.dir === "out" ? "linked from" : "links to"} ${p.graph.seed.replace(/\.md$/, "").split("/").pop()} (${p.graph.kind}, strength ${p.graph.strength.toFixed(2)}, fit ${p.graph.fit.toFixed(2)}${p.graph.prefixed ? ", prefixed" : ""})` : "";
+  const partner = p.partnerOf ? `  ← link partner of ${p.partnerOf.replace(/\.md$/, "").split("/").pop()}` : "";
   console.log(`  #${String(p.fusedRank).padEnd(3)} ${p.src.padEnd(5)} prob=${p.prob === null ? "  -  " : p.prob.toFixed(3)} score=${p.score === null ? "  -  " : p.score.toFixed(3)} ${p.cut.padEnd(5)} ${short(p.key)}${via}${partner}`);
 }
 if (d.graph) {
   const g = r.stats.graph;
-  console.log(`graph: ${g.ran ? "ran" : "skipped (early exit)"} · seeds ${d.graph.seeds.map((x) => short(x.key)).join(", ") || "-"} · ${g.candidates} worth a place, ${g.admitted} admitted, ${g.displaced} displaced, ${g.partners} partner(s) · ${g.ms} ms`);
+  console.log(`graph: ${g.ran ? "ran" : r.earlyExit ? "skipped (early exit)" : "skipped (no place to give)"} · seeds ${d.graph.seeds.map((x) => short(x.key)).join(", ") || "-"} · ${g.candidates} worth a place, ${g.admitted} admitted, ${g.displaced} displaced, ${g.partners} partner(s) · ${g.ms} ms`);
   for (const c of d.graph.candidates.slice(0, 20))
-    console.log(`  ${c.status.padEnd(10)} ${short(c.key ?? `${c.note}#?`)} ${c.dir === "out" ? "from" : "to"} ${short(c.seed)} (${c.kind}, strength ${c.strength.toFixed(2)}${c.fit === undefined ? "" : `, fit ${c.fit.toFixed(2)}, score ${c.score.toFixed(3)}`})`);
+    console.log(`  ${c.status.padEnd(10)} ${short(c.key ?? `${c.note}#?`)} ${c.dir === "out" ? "from" : "to"} ${c.seed.replace(/\.md$/, "").split("/").pop()} (${c.kind}, strength ${c.strength.toFixed(2)}${c.fit === undefined ? "" : `, fit ${c.fit.toFixed(2)}, score ${c.score.toFixed(3)}`})`);
   for (const x of d.graph.displaced) console.log(`  displaced #${x.fusedRank} ${short(x.key)} by ${short(x.by)}`);
 }
 console.log("result:");

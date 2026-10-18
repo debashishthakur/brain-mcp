@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
-import { codeLines, extractLinks, linkWindows, parseNoteFile, splitSections, stripConnections, stripLink, toId, type ParsedNote } from "./parse.js";
+import { CODE_SPAN, codeLines, extractLinks, linkWindows, parseNoteFile, splitSections, stripConnections, stripLink, toId, type ParsedNote } from "./parse.js";
 import { clampGraph, LinkGraph, STRUCTURAL_TYPES } from "./graph.js";
 import { fairSwap, graphPrefix, linkedPartners, protectedKeys, selectGraphPicks, TOP_FIXED, type Access, type CandTrace, type GraphPick, type Seed } from "./graph-select.js";
 import { DenseIndex } from "./dense.js";
@@ -528,9 +528,10 @@ export class VaultIndex {
   /**
    * Resolve a note someone names (a tool argument): its id (path, in any case, .md optional), then a title, file name
    * or alias (a hub wins a shared name, then a concept page, then the newest note), then the link rules: path suffix,
-   * names ignoring hyphens and underscores, retrieval shorthands (see LinkGraph.resolve).
+   * names ignoring hyphens and underscores, retrieval shorthands (see LinkGraph.resolve). The write tools pass
+   * linkRules false, so a loose name never makes them change a note other than the one named.
    */
-  resolve(ref: string): NoteRow | undefined {
+  resolve(ref: string, linkRules = true): NoteRow | undefined {
     const r = ref.trim().replace(/^\[\[|\]\]$/g, "");
     const direct = this.get(r) ?? this.get(r.endsWith(".md") ? r : `${r}.md`);
     if (direct) return direct;
@@ -544,7 +545,7 @@ export class VaultIndex {
       )
       .all(lower) as NoteRow[];
     if (rows[0]) return rows[0];
-    return r ? this.resolveLink("", r) : undefined;
+    return r && linkRules ? this.resolveLink("", r) : undefined;
   }
 
   /** The note a link written in `fromId` points at, by the link rules (see LinkGraph.resolve). */
@@ -978,7 +979,8 @@ export class VaultIndex {
     if (debug) debug.pool = pool;
     // With agreeOverride, keyword and meaning search putting the same section first answers "thin" with that note
     // instead of refusing: evidence the reranker missed, though one rare shared word makes both searches agree too.
-    const searchAgrees = rc.agreeOverride && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key;
+    // (Only when that note reached the reranker: with firstPicks off it can sit below the shortlist.)
+    const searchAgrees = rc.agreeOverride && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key && cands.some((c) => c.item.note_id === lex[0].note_id);
     if (topR < rc.floor && !searchAgrees) return done([], "none", agree);
     const overridden = topR < rc.floor;
     const isGraph = (i: number) => i >= graphFrom;
@@ -1024,7 +1026,7 @@ export class VaultIndex {
         if (!g) keptBase++;
       }
     }
-    // A trimmed section a kept hit links to is kept after all, after every hit (at most keepLinked).
+    // A trimmed section linked with a kept hit is kept after all, after every hit (at most keepLinked).
     if (gstats && gc.keepLinked > 0 && !agree && !overridden && stop === "trim" && out.length < k) {
       const partners = linkedPartners({
         order: scored.map((x) => ({ i: x.i, note: x.c.item.note_id, cut: pool[x.i].cut, reranked: x.reranked, graph: isGraph(x.i) })),
@@ -1179,7 +1181,7 @@ export class VaultIndex {
     const lines = text.split("\n");
     const code = codeLines(lines);
     let masked = lines.map((l, i) => (code[i] ? blank(l) : l)).join("\n");
-    masked = masked.replace(/`[^`\n]*`/g, blank).replace(/!?\[\[[^\]\n]*\]\]/g, blank).replace(/\]\([^)\n]*\)/g, blank).replace(/https?:\/\/\S+/g, blank);
+    masked = masked.replace(CODE_SPAN, blank).replace(/!?\[\[[^\]\n]*\]\]/g, blank).replace(/\]\([^)\n]*\)/g, blank).replace(/https?:\/\/\S+/g, blank);
     masked = masked.replace(/^#{1,6}\s.*$/gm, blank);
     const lower = masked.toLowerCase();
     const linked = new Set<string>();
@@ -1219,12 +1221,18 @@ export class VaultIndex {
       if (!multi && (n.name.length < 5 || !/^\p{L}/u.test(n.name))) continue;
       if (!lower.includes(n.name.toLowerCase())) continue;
       const esc = n.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-      const re = new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, multi ? "iu" : "u");
-      const m = re.exec(masked);
+      const re = new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, multi ? "giu" : "gu");
+      // The first mention not already inside a longer name found earlier.
+      let m: RegExpExecArray | null = null;
+      for (const x of masked.matchAll(re)) {
+        if (!taken.some(([s, e]) => x.index! < e && x.index! + x[0].length > s)) {
+          m = x as RegExpExecArray;
+          break;
+        }
+      }
       if (!m) continue;
       const start = m.index;
       const end = start + m[0].length;
-      if (taken.some(([s, e]) => start < e && end > s)) continue;
       if (!multi && !rare(n.name, n.id)) continue;
       taken.push([start, end]);
       seen.add(n.id);

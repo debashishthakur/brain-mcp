@@ -42,7 +42,7 @@ export interface DenseConfig {
   earlyExit: boolean;
   /**
    * Rerank each list's first pick wherever fusion put it. Off, with floor 0.05 and minKeep 0, reproduces 0.4.0's
-   * ranking, which only reranked the top `rerankN`.
+   * ranking, which only reranked the top `rerankN` (except that a note with no sections no longer reaches the reranker).
    */
   firstPicks: boolean;
   aliases: Record<string, string>;

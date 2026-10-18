@@ -193,7 +193,7 @@ export function graphPrefix(
 }
 
 /**
- * Trimmed sections a kept hit links to, worth keeping after all: the second note of a two-note answer often scores
+ * Trimmed sections linked with a kept hit (either direction), worth keeping after all: the second note of a two-note answer often scores
  * far below the first, and the link is evidence they belong together. Only rows the trim cut, that were reranked and
  * came from the search lists (not the graph), of a note not kept yet and not structural, linked from a kept note with
  * at least `minWeight`; the strongest anchor wins (the earlier kept note on a tie), at most min(max, room), each note

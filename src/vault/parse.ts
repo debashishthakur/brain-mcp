@@ -105,6 +105,9 @@ function ctxAround(text: string, at: number, clean: (s: string) => string = (s) 
   const lead = plainLinks(clean(text.slice(0, at))).replace(/\s+/g, " ").trimStart().length;
   return aroundLink(plainLinks(clean(text)), lead);
 }
+/** An inline code span: a run of backticks, then text, then the same run (``[[X]]`` too). */
+export const CODE_SPAN = /(`+)(?!`)(.+?)(?<!`)\1(?!`)/g;
+
 /** A comma-separated frontmatter string, split at commas outside [[links]] (an alias may hold a comma). */
 const splitCommas = (s: string) => s.split(/,(?![^[]*\]\])/);
 
@@ -127,7 +130,7 @@ export function extractLinks(body: string, fm: Record<string, unknown>): LinkOcc
     for (const item of items) {
       const s = typeof item === "string" ? item : linkKey && (typeof item === "number" || typeof item === "boolean") ? String(item) : null;
       if (s === null) continue;
-      for (const part of linkKey && !Array.isArray(v) && key !== "project" ? splitCommas(s) : [s]) {
+      for (const part of linkKey && !Array.isArray(v) ? splitCommas(s) : [s]) {
         const found = [...part.matchAll(WIKILINK)];
         if (found.length) {
           for (const m of found) if (!(m[1] && ATTACHMENT.test(cleanTarget(m[2])))) fmLink(key, cleanTarget(m[2]), cleanHeading(m[3]));
@@ -152,7 +155,7 @@ export function extractLinks(body: string, fm: Record<string, unknown>): LinkOcc
     // Inline code is blanked out (same length, so positions hold) before links are matched, except a code span inside
     // a link's own brackets, which is part of the note's name: [[`brain_search` tool]].
     const spans = [...raw.matchAll(WIKILINK)].map((m) => [m.index!, m.index! + m[0].length]);
-    const line = raw.replace(/`[^`\n]*`/g, (s: string, at: number) => (spans.some(([a, b]) => at > a && at + s.length < b) ? s : " ".repeat(s.length)));
+    const line = raw.replace(CODE_SPAN, (s: string, _tick: string, _body: string, at: number) => (spans.some(([a, b]) => at > a && at + s.length < b) ? s : " ".repeat(s.length)));
     const matches = [...line.matchAll(WIKILINK)].filter((m) => !(m[1] && ATTACHMENT.test(cleanTarget(m[2]))));
     if (!matches.length) return;
     const bareAt = line.length - line.replace(/^\s*(>\s*)+/, "").length;

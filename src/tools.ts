@@ -309,7 +309,8 @@ export function createBrainServer(d: Deps): McpServer {
       return audit.run("brain_graph", p, args, () => {
         const n = index.resolve(args.note);
         if (!n || !policy.canRead(n, p)) return { result: fail(`No readable note matches "${args.note}".`), notes: [] };
-        const out = index.outgoing(n.id).filter((l) => l.note && l.note.id !== n.id && policy.canRead(l.note, p));
+        // One row per linked note, however many names the note links it by.
+        const out = [...new Map(index.outgoing(n.id).filter((l) => l.note && l.note.id !== n.id && policy.canRead(l.note, p)).map((l) => [l.note!.id, l])).values()];
         const back = readable(index.backlinks(n.id, args.limit), p);
         const shared = index.sharedTopicNeighbours(n.id, args.limit).filter((s) => policy.canRead(s.note, p));
         const parts = [`# ${n.title}\n\`${n.id}\` · ${meta(n, index)}\n`];
@@ -367,8 +368,20 @@ export function createBrainServer(d: Deps): McpServer {
   const mentionHint = (written: string, selfId: string, p: Principal): string => {
     const found = index.unlinkedMentions(written, selfId, (n) => policy.canRead(n, p));
     if (!found.length) return "";
-    const lines = found.map((m) => `- "${m.name}" → [[${m.title}]]: "${policy.redact(m.snippet).text}"`);
-    return `\n\nUnlinked mentions of existing notes. Where the sentence says how they relate, link the first mention there with brain_edit (old_text = that sentence); leave passing mentions alone:\n${lines.join("\n")}`;
+    // A title with # | ^ [ ] would be read as another link target: such a note is linked by its path, or left out
+    // when the path has them too.
+    const special = /[#|^[\]]/;
+    const link = (m: { id: string; title: string }) => {
+      if (!special.test(m.title)) return `[[${m.title}]]`;
+      const p = m.id.replace(/\.md$/i, "");
+      return special.test(p) ? null : `[[${p}|${m.title.replace(/[|[\]]/g, "")}]]`;
+    };
+    const lines = found.flatMap((m) => {
+      const l = link(m);
+      return l ? [`- "${m.name}" → ${l}: "${policy.redact(m.snippet).text}"`] : [];
+    });
+    if (!lines.length) return "";
+    return `\n\nUnlinked mentions of existing notes. Where the sentence says how they relate, link the first mention there with brain_edit; leave passing mentions alone:\n${lines.join("\n")}`;
   };
 
   server.registerTool(
@@ -641,7 +654,7 @@ export function createBrainServer(d: Deps): McpServer {
   };
   /** A note the caller names by id, title or [[wikilink|alias]], checked for write access. */
   const writableNote = (ref: string, p: Principal): { note: NoteRow; abs: string; rel: string } => {
-    const note = index.resolve(ref.replace(/\|[^\]]*/, ""));
+    const note = index.resolve(ref.replace(/\|[^\]]*/, ""), false);
     if (!note || !policy.canRead(note, p)) throw new Error(`Note not found: ${ref}`);
     return { note, ...writable(note.id) };
   };

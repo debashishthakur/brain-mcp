@@ -63,7 +63,7 @@ jobs:
         run: node scripts/verify-mentions.mjs
       - name: Retrieval eval, keyword vs hybrid
         run: node scripts/eval-retrieval.mjs
-      - name: Hard eval set (fails only if two runs disagree)
+      - name: Hard eval set (fails if two runs disagree or the reranker pair count changes)
         run: node scripts/eval-hybrid.mjs --repeat 2
       - name: Vault is restored
         run: git diff --exit-code -- example-vault

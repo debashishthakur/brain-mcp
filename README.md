@@ -74,7 +74,7 @@ flowchart LR
    - **Understand:** expand shorthands (`pg` → PostgreSQL) and fix typos against the vault's own words.
    - **Search four ways:** keywords per section (BM25), meaning (embeddings), exact dates, and note titles.
    - **Fuse** the four lists with reciprocal rank fusion.
-   - **Follow links** (off by default, `retrieval.graph`): a section of a note the top hits link to can take a reranker place from the weakest fused entry it beats, and the reranker reads the sentence that links them. A section the last step would trim is kept anyway when a kept hit links to it.
+   - **Follow links** (off by default, `retrieval.graph`): a section of a note linked with the top hits can take a reranker place from the weakest fused entry it beats, and the reranker reads the sentence that links them. A section the last step would trim is kept anyway when it is linked with a kept hit.
    - **Rerank** the best candidates with a cross-encoder (`bge-reranker-base`), always including each list's first pick, so fusion cannot bury a hit only one search found. When keyword and meaning search agree on the top hit and fusion keeps it in the top 3, only those 3 are reranked.
    - **Decide:** if even the best passage scores below the reranker's floor, answer "nothing relevant"; otherwise return the strong hits and at least the five best, cited by note, with a coverage label (good, thin, none).
 3. **Serve.** Over stdio beside your editor, over HTTP with a bearer token on your network, or behind an OAuth 2.1 login through Cloudflare Tunnel for the public internet.
@@ -213,7 +213,7 @@ node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
 node scripts/eval-retrieval.mjs  # 12 questions, keyword vs hybrid
-node scripts/eval-hybrid.mjs     # 26 harder questions: paraphrase, typo, identifier, date, two-note, alias, off-topic
+node scripts/eval-hybrid.mjs     # 29 harder questions: paraphrase, typo, identifier, date, two-note, alias, off-topic
 node scripts/debug-rank.mjs "your question"   # trace one query: each list, the reranker shortlist and why entries were cut
 node scripts/graph-stats.mjs     # your link graph: links by where they sit, links written between content notes, unresolved names
 ```
@@ -361,7 +361,7 @@ The index derives a `facts` table from these lines whenever the file changes, an
 | `privateProjects`, `privatePaths` | Project names and globs that need the `brain:private` scope. |
 | `context.*` | `brain_context` budget, per-section cap, sections per note and candidate pool sizes. |
 | `identity.*` | Profile note, memory and skills projects, focus window and size caps. |
-| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `firstPicks` (also rerank each search's own best hit), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"; calibrated per reranker model unless you set it), `goodAt` (coverage "good" from here up), `keepRatio`, `minKeep` (always keep this many hits), `agreeOverride` (off; on, no refusal when keyword and meaning search put the same section first), `earlyExit`, `aliases` for your own shorthands, and `graph`, the link graph in ranking: `enabled` (off), `slots` (most reranker places linked sections may take, a ceiling), `seeds`, `linksPerSeed`, `minWeight`, `swapWeight` (above 1 forces linked sections in, for experiments), `prefix` (show the linking sentence), `keepLinked` and `keepMinWeight` (keep a trimmed section a kept hit links to), and the link weights `kinds` and `keys`. `BRAIN_MCP_GRAPH=0` or `1` and `BRAIN_MCP_GRAPH_SLOTS` override. Every field is optional. |
+| `retrieval.*` | Hybrid ranking: `hybrid` on or off, `embedModel`, `rerankModel`, `rerankN` (candidates to rerank), `firstPicks` (also rerank each search's own best hit), `blend` (fused rank vs reranker), `floor` (below it, "nothing relevant"; calibrated per reranker model unless you set it), `goodAt` (coverage "good" from here up), `keepRatio`, `minKeep` (always keep this many hits), `agreeOverride` (off; on, no refusal when keyword and meaning search put the same section first), `earlyExit`, `aliases` for your own shorthands, and `graph`, the link graph in ranking: `enabled` (off), `slots` (most reranker places linked sections may take, a ceiling), `seeds`, `linksPerSeed`, `minWeight`, `swapWeight` (above 1 forces linked sections in, for experiments), `prefix` (show the linking sentence), `keepLinked` and `keepMinWeight` (keep a trimmed section linked with a kept hit), and the link weights `kinds` and `keys`. `BRAIN_MCP_GRAPH=0` or `1` and `BRAIN_MCP_GRAPH_SLOTS` override. Every field is optional. |
 | `writableDirs` | Folders the write, edit, move and delete tools may change. Default: the capture folder and `Notes`. |
 | `http.*` | Host, port and path for HTTP modes. The shipped config uses `127.0.0.1:3737/mcp`. |
 | `auth.*` | Mode, public URL, token lifetimes, lockout policy and default scopes for OAuth. |
