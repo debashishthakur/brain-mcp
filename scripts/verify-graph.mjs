@@ -86,6 +86,7 @@ const pick = (note, score, extra = {}) => ({ note, key: `${note}#0`, ord: 0, fit
     JSON.stringify(sel.trace.map((t) => [t.note, t.status])),
   );
   check("selection: a note reached twice keeps its best score (the earlier seed on a tie), best first, then no-slot", sel.picks.map((g) => `${g.note}:${g.seed.note}`).join() === "A:S1,B:S1" && sel.overflow.map((g) => g.note).join() === "D" && st("D") === "no-slot", JSON.stringify({ picks: sel.picks.map((g) => [g.note, g.seed.note, g.score]), over: sel.overflow.map((g) => g.note) }));
+  check("selection: a note two seeds link to gets the shared-link boost", Math.abs(sel.picks[0].score - 1 * 0.9 * 0.5 * 1.5) < 1e-9, String(sel.picks[0].score));
 }
 {
   const p = protectedKeys({ lex: ["a", "b", "c", "d"], den: ["e", "f", "g", "d"], exact: ["x"], note: ["h"] }, ["s"], ["a", "d", "z", "x"]);

@@ -12,6 +12,8 @@ export const TOP_FIXED = 3;
 export const PROTECT_LIST_TOP = 3;
 /** An entry that meaning search and a keyword list both rank this high or better is never displaced. */
 export const PROTECT_BOTH = 10;
+/** Extra score for a linked note reached from each further seed. */
+export const SHARED_BOOST = 0.5;
 /** Longest linking sentence shown to the reranker in front of a linked section. */
 export const PREFIX_CHARS = 200;
 
@@ -76,6 +78,7 @@ export function selectGraphPicks(o: {
 }): { picks: GraphPick[]; overflow: GraphPick[]; trace: CandTrace[] } {
   const trace: CandTrace[] = [];
   const best = new Map<string, GraphPick>();
+  const seedsOf = new Map<string, number>();
   const traced = (g: GraphPick, status: CandStatus): CandTrace => ({ note: g.note, key: g.key, seed: g.seed.note, dir: g.nb.dir, kind: g.nb.kind, strength: g.nb.strength, fit: g.fit, score: g.score, status });
   for (const s of o.seeds) {
     const options: GraphPick[] = [];
@@ -99,10 +102,13 @@ export function selectGraphPicks(o: {
     options.sort((a, b) => b.score - a.score || cmpKey(a.key, b.key));
     options.forEach((g, i) => {
       if (i >= o.linksPerSeed) return void trace.push(traced(g, "cap"));
+      seedsOf.set(g.note, (seedsOf.get(g.note) ?? 0) + 1);
       const cur = best.get(g.note);
       if (!cur || g.score > cur.score) best.set(g.note, g);
     });
   }
+  // A note several seeds link to is what connects them ("what links A and B"): +50% per extra seed.
+  for (const [note, n] of seedsOf) if (n > 1) best.get(note)!.score *= 1 + SHARED_BOOST * (n - 1);
   const ranked = [...best.values()].sort((a, b) => b.score - a.score || cmpKey(a.key, b.key));
   const overflow = ranked.slice(o.max);
   for (const g of overflow) trace.push(traced(g, "no-slot"));
