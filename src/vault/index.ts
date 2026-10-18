@@ -251,6 +251,9 @@ export interface HybridSearchResult {
 }
 
 /** Reciprocal rank fusion over ranked lists keyed by section. */
+/** Hybrid rankings run at once; the rest queue. */
+const RANK_CONCURRENCY = 2;
+
 function rrf<T extends { key: string }>(lists: T[][], k = RRF_K_FUSION): { key: string; score: number; item: T }[] {
   const acc = new Map<string, { score: number; item: T }>();
   for (const l of lists) {
@@ -762,6 +765,21 @@ export class VaultIndex {
    * → gate. Falls back to keyword-only fusion (coverage "lexical") when the models are unavailable.
    */
   async rankSections(query: string, o: SearchOptions & { k?: number; debug?: boolean } = {}): Promise<RankResult> {
+    // At most RANK_CONCURRENCY rankings at once: each runs the models, and a burst of parallel searches can run a
+    // small machine out of memory. The rest wait their turn.
+    if (this.ranking >= RANK_CONCURRENCY) await new Promise<void>((r) => this.rankQueue.push(r));
+    this.ranking++;
+    try {
+      return await this.rankSectionsNow(query, o);
+    } finally {
+      this.ranking--;
+      this.rankQueue.shift()?.();
+    }
+  }
+  private ranking = 0;
+  private rankQueue: (() => void)[] = [];
+
+  private async rankSectionsNow(query: string, o: SearchOptions & { k?: number; debug?: boolean }): Promise<RankResult> {
     const t0 = Date.now();
     const rc = this.cfg.retrieval;
     const k = Math.min(Math.max(o.k ?? 10, 1), 50);
