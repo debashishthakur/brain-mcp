@@ -99,7 +99,7 @@ let CASES = (Array.isArray(raw) ? raw : raw.queries).map((e, i) => {
     ? e.evidence.map((x) => (Array.isArray(x) ? x : x && typeof x === "object" ? Object.values(x) : [x]).filter(Boolean).map(evNorm).filter(Boolean)).filter((g) => g.length)
     : [];
   const split = e.id ? (fnv1a(`brb:${e.family ?? e.id}`) % 4 === 0 ? "dev" : "test") : "all";
-  return { id: e.id ?? `case-${i + 1}`, cls, q: e.q ?? e.query, gold, required, evidence, offtopic, split };
+  return { id: e.id ?? `case-${i + 1}`, cls, q: e.q ?? e.query, gold, required, evidence, offtopic, split, qrels: e.qrels ?? {} };
 });
 if (opt.split !== "all") CASES = CASES.filter((c) => c.split === opt.split);
 if (opt.only) CASES = CASES.filter((c) => c.cls === opt.only);
@@ -132,8 +132,14 @@ if (index.dense) {
 } else console.log("dense: hybrid off, so search and context are the keyword pipeline");
 const nSections = index.db.prepare("SELECT COUNT(*) c FROM sections").get().c;
 const rc = cfg.retrieval;
+const graphSettings = () => {
+  const g = rc.graph;
+  return g?.enabled
+    ? `graph on (slots ${g.slots}, seeds ${g.seeds}, linksPerSeed ${g.linksPerSeed}, minWeight ${g.minWeight}, swapWeight ${g.swapWeight}, prefix ${g.prefix}, keepLinked ${g.keepLinked}, keepMinWeight ${g.keepMinWeight})`
+    : "graph off";
+};
 const settings = () =>
-  `rerank ${rc.rerankModel.split("/").pop()} · rerankN ${rc.rerankN} · floor ${rc.floor} · goodAt ${rc.goodAt} · keepRatio ${rc.keepRatio} · minKeep ${rc.minKeep} · agreeOverride ${rc.agreeOverride} · blend ${rc.blend} · earlyExit ${rc.earlyExit} · firstPicks ${rc.firstPicks}`;
+  `rerank ${rc.rerankModel.split("/").pop()} · rerankN ${rc.rerankN} · floor ${rc.floor} · goodAt ${rc.goodAt} · keepRatio ${rc.keepRatio} · minKeep ${rc.minKeep} · agreeOverride ${rc.agreeOverride} · blend ${rc.blend} · earlyExit ${rc.earlyExit} · firstPicks ${rc.firstPicks} · ${graphSettings()}`;
 console.log(`vault: ${path.basename(cfg.vaultDir)} · ${ri.indexed} notes · ${nSections} sections · ${CASES.length} cases${opt.split !== "all" ? ` (${opt.split} split)` : ""}`);
 console.log(`settings: ${settings()}`);
 
@@ -220,15 +226,16 @@ function trace(note, groups, r, kept24, top5, packed, pack) {
   const listed = ["lex", "den", "exact", "note"].filter((l) => d.lists[l].some((k) => G.has(k)));
   const fusedRank = d.fused.findIndex((f) => G.has(f.key)) + 1;
   const poolE = d.pool.filter((p) => G.has(p.key));
+  const displaced = !!d.graph?.displaced.some((x) => G.has(x.key));
   const kept = kept24.some((s) => G.has(`${s.note_id}#${s.ord}`));
   // `packed`: a gold section is in the pack (the funnel's last stage); `notePacked`: any section of the note is.
   const packed_ = packed ? packed.some((s) => G.has(`${s.note_id}#${s.ord}`)) : pack.includes(note);
   let lost = null;
   if (!secs.length) lost = "missing from vault";
-  else if (!listed.length) lost = "not found";
-  else if (!poolE.length) lost = r.coverage === "lexical" ? "past k" : "below shortlist";
+  else if (!listed.length && !poolE.length) lost = "not found";
+  else if (!poolE.length) lost = displaced ? "displaced by graph" : r.coverage === "lexical" ? "past k" : "below shortlist";
   else if (r.coverage === "none") lost = "refused";
-  else if (!kept) lost = poolE.some((p) => p.cut === "trim") ? "trimmed" : "past k";
+  else if (!kept) lost = poolE.every((p) => p.src === "graph" && p.cut === "floor") ? "graph floor" : poolE.some((p) => p.cut === "trim") ? "trimmed" : "past k";
   else if (!packed_) lost = "not packed";
   return {
     note,
@@ -237,6 +244,8 @@ function trace(note, groups, r, kept24, top5, packed, pack) {
     fusedRank: fusedRank || null,
     pool: poolE.length > 0,
     reranked: poolE.some((p) => p.reranked),
+    viaGraph: poolE.some((p) => p.src === "graph"),
+    partner: poolE.some((p) => p.partnerOf),
     kept,
     top5: top5.includes(note),
     packed: packed_,
@@ -273,7 +282,44 @@ async function hybridPass() {
     const need = c.required.map((note) => trace(note, c.evidence, r, kept24, top5, packed, pack));
     const evid = evidenceFound(packText, c.evidence);
     const sig = JSON.stringify([r.coverage, r.debug.pool.map((p) => [p.key, p.cut, p.prob === null ? null : p.prob.toFixed(6), p.score === null ? null : p.score.toFixed(6)])]);
-    rows.push({ ...c, refused: r.coverage === "none", coverage: r.coverage, topProb: r.stats.topProb, earlyExit: r.earlyExit, pairs: r.stats.reranked, pool: r.stats.pool, fused: r.stats.fused, ms, top5, pack, need, evid, sig });
+    const gsig = JSON.stringify(r.debug.pool.map((p) => [p.src, p.partnerOf ?? null, p.graph?.seed ?? null]));
+    // The graph never changes how many pairs the reranker scores: the shortlist head plus each list's first pick
+    // outside it, or the top 3 on the early-exit shortcut.
+    if (r.coverage !== "lexical" && r.stats.fused) {
+      const head = r.debug.fused.slice(0, rc.rerankN).map((f) => f.key);
+      const lists = r.debug.lists;
+      const firsts = rc.firstPicks ? distinct([lists.lex[0], lists.den[0], lists.exact[0], lists.note[0]].filter((x) => x && !head.includes(x))) : [];
+      const wantPool = Math.min(rc.rerankN, r.stats.fused) + firsts.length;
+      const wantPairs = r.earlyExit ? Math.min(3, wantPool) : wantPool;
+      if (wantPool && r.stats.reranked !== wantPairs) {
+        budgetErrors++;
+        console.log(`  PAIR BUDGET: ${r.stats.reranked} pairs, expected ${wantPairs}: ${c.q}`);
+      }
+    }
+    // Graph reach: needed notes lost before the reranker that sit one followed link from a seed.
+    const seeds = r.debug.graph?.seeds.map((x) => x.note) ?? [];
+    const g = r.stats.graph;
+    for (const n of need)
+      n.reach = !!g && ["not found", "below shortlist", "displaced by graph"].includes(n.lost) && seeds.some((sd) => index.graph.neighbours(sd).some((nb) => nb.id === n.note && nb.strength >= rc.graph.minWeight));
+    const partners = r.debug.pool.filter((p) => p.partnerOf).map((p) => p.key.slice(0, p.key.lastIndexOf("#")));
+    rows.push({
+      ...c,
+      refused: r.coverage === "none",
+      coverage: r.coverage,
+      topProb: r.stats.topProb,
+      earlyExit: r.earlyExit,
+      pairs: r.stats.reranked,
+      pool: r.stats.pool,
+      fused: r.stats.fused,
+      ms,
+      top5,
+      pack,
+      need,
+      evid,
+      graph: g ? { ...g, rows: r.debug.pool.filter((p) => p.src === "graph").length, partners, partnersGraded: partners.filter((id) => (c.qrels[id] ?? 0) >= 2).length } : null,
+      sig,
+      gsig,
+    });
   }
   return rows;
 }
@@ -323,6 +369,41 @@ function summarize(label, rows) {
     const groups = ev.flatMap((r) => r.evid);
     console.log(`  evidence in the pack: ${pct(groups.filter(Boolean).length, groups.length)} of ${groups.length} groups · every group for ${pct(ev.filter((r) => r.evid.every(Boolean)).length, ev.length)} of ${ev.length} questions`);
   }
+  const gr = rows.filter((r) => r.graph);
+  if (gr.length) {
+    const needs = rows.flatMap((r) => r.need);
+    const via = needs.filter((n) => n.viaGraph);
+    const partners = gr.flatMap((r) => r.graph.partners.map((id) => ({ id, needed: r.required.includes(id) })));
+    console.log(
+      `  graph: ${(gr.reduce((a, r) => a + r.graph.rows, 0) / rows.length).toFixed(2)} linked rows/q in ${gr.filter((r) => r.graph.rows).length} questions · needed notes through it: shortlisted ${via.length} (${via.filter((n) => !n.listed.length).length} no list found), kept ${via.filter((n) => n.kept).length}, packed ${via.filter((n) => n.packed).length} · displaced ${needs.filter((n) => n.lost === "displaced by graph").length} · partners ${(partners.length / rows.length).toFixed(2)}/q (${partners.filter((x) => x.needed).length} needed, ${gr.reduce((a, r) => a + r.graph.partnersGraded, 0)} graded 2+) · reach ${needs.filter((n) => n.reach).length} of ${needs.filter((n) => ["not found", "below shortlist", "displaced by graph"].includes(n.lost)).length} lost before the reranker · graph ms p95 ${p95(gr.map((r) => r.graph.ms))}`,
+    );
+  }
+}
+
+/** A sweep variant against the first one: needed notes gained and lost per stage, coverage changes, refusals, pairs. */
+function diffLine(base, rows) {
+  const stage = (key) => {
+    let gained = 0;
+    let lost = 0;
+    rows.forEach((r, i) =>
+      r.need.forEach((n, j) => {
+        const was = base[i].need[j][key];
+        if (n[key] && !was) gained++;
+        if (!n[key] && was) lost++;
+      }),
+    );
+    return `+${gained}/-${lost}`;
+  };
+  const refused = (rs, off) => rs.filter((r) => r.offtopic === off && r.refused).length;
+  const ppq = (rs) => rs.reduce((a, r) => a + r.pairs, 0) / rs.length;
+  const d = {
+    coverage: rows.filter((r, i) => r.coverage !== base[i].coverage).length,
+    onTopic: refused(rows, false) - refused(base, false),
+    offTopic: refused(rows, true) - refused(base, true),
+    pairs: ppq(rows) - ppq(base),
+  };
+  console.log(`  vs the first value: needed notes shortlisted ${stage("pool")} · kept ${stage("kept")} · packed ${stage("packed")} · coverage changed in ${d.coverage} · on-topic refused ${d.onTopic >= 0 ? "+" : ""}${d.onTopic}, off-topic refused ${d.offTopic >= 0 ? "+" : ""}${d.offTopic} · pairs/q ${d.pairs >= 0 ? "+" : ""}${d.pairs.toFixed(2)}`);
+  return d;
 }
 
 const variants = [];
@@ -333,7 +414,7 @@ const runVariant = async (label) => {
   for (let i = 1; i < opt.repeat; i++) {
     const again = await hybridPass();
     again.forEach((r, j) => {
-      if (r.sig !== rows[j].sig) {
+      if (r.sig !== rows[j].sig || r.gsig !== rows[j].gsig) {
         mismatch++;
         console.log(`  NONDETERMINISTIC${label ? ` [${label}]` : ""} (run ${i + 1}): ${r.q}`);
       }
@@ -343,6 +424,8 @@ const runVariant = async (label) => {
 };
 
 let mismatch = 0;
+let budgetErrors = 0;
+let sweepErrors = 0;
 if (opt.sweep) {
   const eq = opt.sweep.indexOf("=");
   const key = opt.sweep.slice(0, eq);
@@ -352,18 +435,27 @@ if (opt.sweep) {
   }
   for (const v of opt.sweep.slice(eq + 1).split(",")) {
     setPath(cfg, key, parseValue(v));
-    await runVariant(`${key}=${v}`);
+    const rows = await runVariant(`${key}=${v}`);
+    if (variants.length > 1) {
+      const d = diffLine(variants[0].rows, rows);
+      // A graph setting must never cost reranker pairs or answer off-topic questions it refused before.
+      if (key.startsWith("retrieval.graph.") && (d.pairs > 1e-9 || d.offTopic < 0)) {
+        sweepErrors++;
+        console.log(`  GRAPH SWEEP: ${d.pairs > 1e-9 ? "pairs per question rose" : "fewer off-topic questions refused"}`);
+      }
+    }
   }
 } else await runVariant("");
 if (opt.repeat > 1) console.log(mismatch ? `\ndeterminism: ${mismatch} case(s) differ across ${opt.repeat} runs` : `\ndeterminism: identical across ${opt.repeat} runs`);
+if (budgetErrors) console.log(`\npair budget: ${budgetErrors} question(s) were reranked with a different number of pairs than the shortlist holds`);
 
 if (opt.json) {
   fs.mkdirSync(path.dirname(path.resolve(opt.json)), { recursive: true });
   fs.writeFileSync(
     path.resolve(opt.json),
-    JSON.stringify({ vault: path.basename(cfg.vaultDir), notes: ri.indexed, sections: nSections, cases: CASES.length, split: opt.split, variants: variants.map((v) => ({ ...v, rows: v.rows.map(({ sig, ...r }) => r) })) }, null, 1),
+    JSON.stringify({ vault: path.basename(cfg.vaultDir), notes: ri.indexed, sections: nSections, cases: CASES.length, split: opt.split, variants }, null, 1),
   );
   console.log(`\nwrote ${opt.json}`);
 }
 await index.close();
-process.exit(mismatch ? 1 : 0);
+process.exit(mismatch || budgetErrors || sweepErrors ? 1 : 0);

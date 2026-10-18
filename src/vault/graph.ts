@@ -10,22 +10,30 @@ import { LINK_KEYS, stripLink, type LinkKind } from "./parse.js";
  */
 
 export interface GraphConfig {
-  /** Pull strongly linked notes' sections into the reranker shortlist. Off until the eval shows a gain. */
+  /** Use links in ranking: linked sections may take reranker places, and a kept hit's link partner may be kept. */
   enabled: boolean;
-  /** Most shortlist entries graph candidates may take (they replace the bottom of the fused list, one for one). */
+  /**
+   * Most reranker places linked sections may take, at most rerankN - 3. Each replaces the weakest unprotected fused
+   * entry it beats (see swapWeight), so this is a ceiling: how many are used depends on the links and the question.
+   */
   slots: number;
-  /** Top fused sections whose notes start the expansion. */
+  /** Notes of the top fused sections that start the expansion. */
   seeds: number;
-  /** Strongest links followed from each starting note. */
+  /** Most links followed from each starting note, the best by starting score x link strength x fit to the question. */
   linksPerSeed: number;
-  /** Links weaker than this are not followed. */
+  /** Links weaker than this are not followed for places. */
   minWeight: number;
-  /** 1: linked notes only. 2: also notes linked from those, along sentence links only. */
-  depth: number;
-  /** Graph candidates reranked alongside the top 3 when the early-exit shortcut applies. */
-  exitSlots: number;
-  /** Show the reranker the sentence that links a graph candidate to the note it was reached from. */
+  /**
+   * A linked section takes a place when swapWeight x its score (starting note's fused score x link strength x its
+   * cosine) beats the place's fused score, both relative to the best. 1 is a fair swap; more forces linked sections in.
+   */
+  swapWeight: number;
+  /** Show the reranker the sentence that links a graph section to the note it was reached from. */
   prefix: boolean;
+  /** Most sections the trim cut that are kept anyway because a kept hit links to them (0 turns this off). */
+  keepLinked: number;
+  /** Link strength a kept hit's link needs for that. */
+  keepMinWeight: number;
   /** Weight of a link by where it sits. */
   kinds: Record<Exclude<LinkKind, "fm">, number>;
   /** Weight of a frontmatter link by key; "*" for any other key that holds a [[link]]. */
@@ -34,16 +42,41 @@ export interface GraphConfig {
 
 export const GRAPH_DEFAULTS: GraphConfig = {
   enabled: false,
-  slots: 3,
+  slots: 10,
   seeds: 5,
   linksPerSeed: 3,
   minWeight: 0.2,
-  depth: 1,
-  exitSlots: 3,
+  swapWeight: 1,
   prefix: true,
+  keepLinked: 1,
+  keepMinWeight: 0.1,
   kinds: { sentence: 1.0, embed: 0.8, list_explained: 0.7, heading: 0.5, table: 0.5, short: 0.4, list_bare: 0.3, trailer: 0 },
   keys: { related: 0.3, "part-of": 0.3, project: 0.2, topics: 0.15, "*": 0.2 },
 };
+
+/**
+ * Graph settings within their ranges: a value that is not a finite number takes the default, others are clamped. Run
+ * by the config loader and again by the ranker, since evals set values directly.
+ */
+export function clampGraph(g: GraphConfig): GraphConfig {
+  const d = GRAPH_DEFAULTS;
+  const num = (v: unknown, def: number, lo: number, hi: number, int = false) => {
+    const n = Math.min(hi, Math.max(lo, typeof v === "number" && Number.isFinite(v) ? v : def));
+    return int ? Math.round(n) : n;
+  };
+  return {
+    ...g,
+    enabled: g.enabled === true,
+    slots: num(g.slots, d.slots, 0, 64, true),
+    seeds: num(g.seeds, d.seeds, 1, 16, true),
+    linksPerSeed: num(g.linksPerSeed, d.linksPerSeed, 1, 10, true),
+    minWeight: num(g.minWeight, d.minWeight, 0, 10),
+    swapWeight: num(g.swapWeight, d.swapWeight, 0, 1000),
+    prefix: g.prefix !== false,
+    keepLinked: num(g.keepLinked, d.keepLinked, 0, 5, true),
+    keepMinWeight: num(g.keepMinWeight, d.keepMinWeight, 0.01, 10),
+  };
+}
 
 /** Note types that organise other notes rather than hold content: they bridge, but are never answers. */
 export const STRUCTURAL_TYPES = new Set(["hub", "concept", "moc", "meta", "guide"]);
@@ -81,6 +114,16 @@ interface PairEdge {
   occs: Occ[];
 }
 
+/** One occurrence of a link between two notes: where it sits in the linking note, and its weight. */
+export interface NeighbourOcc {
+  pos: number;
+  /** Section window of the linking note; null for frontmatter. */
+  ord: number | null;
+  /** The occurrence's kind ("fm:<key>" for frontmatter). */
+  kind: string;
+  weight: number;
+}
+
 /** One step from a note to a neighbour, scored. */
 export interface Neighbour {
   id: string;
@@ -95,6 +138,11 @@ export interface Neighbour {
   fromOrd: number | null;
   /** The `#heading` the link points at, if any. */
   heading: string | null;
+  /**
+   * Every occurrence that carries the link, in the linking note (this note for "out", the neighbour for "in"), in
+   * order; generated trailer lines are left out.
+   */
+  occs: NeighbourOcc[];
 }
 
 export interface GraphStats {
@@ -111,7 +159,10 @@ export interface GraphStats {
 }
 
 const SPEC_NORM = Math.log2(3);
-/** Specificity of a target with `d` linkers: 1 at d = 1, 0.61 at 4, 0.44 at 10, 0.25 at 80. */
+/**
+ * Specificity of a target with `d` linkers: 1 at d = 1, 0.61 at 4, 0.44 at 10, 0.25 at 80. Degrees count the links of
+ * every note, private ones included: a corpus statistic like BM25's document frequencies, which reveals no id or text.
+ */
 const spec = (d: number) => SPEC_NORM / Math.log2(2 + Math.max(1, d));
 const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -324,13 +375,15 @@ export class LinkGraph {
     this.ensure();
     const out: Neighbour[] = [];
     const best = (e: PairEdge) => e.occs.reduce((a, b) => (b.weight > a.weight ? b : a));
+    const occs = (e: PairEdge): NeighbourOcc[] =>
+      e.occs.filter((x) => x.kind !== "trailer").map((x) => ({ pos: x.pos, ord: x.ord, kind: x.kind === "fm" ? `fm:${x.fmKey}` : x.kind, weight: x.weight }));
     for (const e of this.outE.get(id)?.values() ?? []) {
       const o = best(e);
-      out.push({ id: e.to, dir: "out", strength: this.strength(e, "out"), kind: e.kind, from: e.from, pos: o.pos, fromOrd: o.ord, heading: o.heading });
+      out.push({ id: e.to, dir: "out", strength: this.strength(e, "out"), kind: e.kind, from: e.from, pos: o.pos, fromOrd: o.ord, heading: o.heading, occs: occs(e) });
     }
     for (const e of this.inE.get(id)?.values() ?? []) {
       const o = best(e);
-      out.push({ id: e.from, dir: "in", strength: this.strength(e, "in"), kind: e.kind, from: e.from, pos: o.pos, fromOrd: o.ord, heading: null });
+      out.push({ id: e.from, dir: "in", strength: this.strength(e, "in"), kind: e.kind, from: e.from, pos: o.pos, fromOrd: o.ord, heading: null, occs: occs(e) });
     }
     // A pair linked both ways appears twice; keep the stronger direction.
     const keep = new Map<string, Neighbour>();

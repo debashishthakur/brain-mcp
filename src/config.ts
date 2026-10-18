@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DENSE_DEFAULTS, floorFor, type DenseConfig } from "./vault/dense.js";
-import type { GraphConfig } from "./vault/graph.js";
+import { clampGraph, type GraphConfig } from "./vault/graph.js";
 
 export interface BrainConfig {
   /** Hybrid retrieval (BM25 + local embeddings + reranker). Every field is optional; see DENSE_DEFAULTS. */
@@ -134,5 +134,6 @@ export function loadConfig(overridePath?: string): ResolvedConfig {
   if (process.env.BRAIN_MCP_HYBRID === "0") retrieval.hybrid = false; // emergency switch back to keyword-only ranking
   if (process.env.BRAIN_MCP_GRAPH === "0" || process.env.BRAIN_MCP_GRAPH === "1") retrieval.graph.enabled = process.env.BRAIN_MCP_GRAPH === "1";
   if (process.env.BRAIN_MCP_GRAPH_SLOTS) retrieval.graph.slots = Number(process.env.BRAIN_MCP_GRAPH_SLOTS);
+  retrieval.graph = clampGraph(retrieval.graph);
   return { ...raw, auth, retrieval, rootDir: ROOT_DIR, configPath: cfgPath, vaultDir, dataDir, modelsDir, logDir };
 }

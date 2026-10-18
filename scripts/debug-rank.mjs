@@ -1,5 +1,5 @@
 // Trace one query through the hybrid ranker: terms, each candidate list, the reranker shortlist (where each entry
-// came from, its probability and why it was cut), and the final sections.
+// came from, its probability and why it was cut), what the link graph added, and the final sections.
 // Run after `npm run build`:  node scripts/debug-rank.mjs [--config file] [--set key=value ...] <question>
 import path from "node:path";
 import fs from "node:fs";
@@ -50,8 +50,18 @@ for (const [name, list] of Object.entries(d.lists)) if (list.length) console.log
 console.log(`rerank ${cfg.retrieval.rerankModel.split("/").pop()} · rerankN ${cfg.retrieval.rerankN} · floor ${cfg.retrieval.floor} · goodAt ${cfg.retrieval.goodAt} · minKeep ${cfg.retrieval.minKeep} · agreeOverride ${cfg.retrieval.agreeOverride}`);
 console.log(`fused ${r.stats.fused} · shortlist ${r.stats.pool} · reranked ${r.stats.reranked} · best prob ${r.stats.topProb === null ? "-" : r.stats.topProb.toFixed(3)} · coverage=${r.coverage} early=${r.earlyExit} ms=${r.ms}`);
 console.log("shortlist (fused rank, source, reranker probability, blended score, cut):");
-for (const p of d.pool)
-  console.log(`  #${String(p.fusedRank).padEnd(3)} ${p.src.padEnd(5)} prob=${p.prob === null ? "  -  " : p.prob.toFixed(3)} score=${p.score === null ? "  -  " : p.score.toFixed(3)} ${p.cut.padEnd(5)} ${short(p.key)}`);
+for (const p of d.pool) {
+  const via = p.graph ? `  ← ${p.graph.dir === "out" ? "linked from" : "links to"} ${short(p.graph.seed)} (${p.graph.kind}, strength ${p.graph.strength.toFixed(2)}, fit ${p.graph.fit.toFixed(2)}${p.graph.prefixed ? ", prefixed" : ""})` : "";
+  const partner = p.partnerOf ? `  ← link partner of ${short(p.partnerOf)}` : "";
+  console.log(`  #${String(p.fusedRank).padEnd(3)} ${p.src.padEnd(5)} prob=${p.prob === null ? "  -  " : p.prob.toFixed(3)} score=${p.score === null ? "  -  " : p.score.toFixed(3)} ${p.cut.padEnd(5)} ${short(p.key)}${via}${partner}`);
+}
+if (d.graph) {
+  const g = r.stats.graph;
+  console.log(`graph: ${g.ran ? "ran" : "skipped (early exit)"} · seeds ${d.graph.seeds.map((x) => short(x.key)).join(", ") || "-"} · ${g.candidates} worth a place, ${g.admitted} admitted, ${g.displaced} displaced, ${g.partners} partner(s) · ${g.ms} ms`);
+  for (const c of d.graph.candidates.slice(0, 20))
+    console.log(`  ${c.status.padEnd(10)} ${short(c.key ?? `${c.note}#?`)} ${c.dir === "out" ? "from" : "to"} ${short(c.seed)} (${c.kind}, strength ${c.strength.toFixed(2)}${c.fit === undefined ? "" : `, fit ${c.fit.toFixed(2)}, score ${c.score.toFixed(3)}`})`);
+  for (const x of d.graph.displaced) console.log(`  displaced #${x.fusedRank} ${short(x.key)} by ${short(x.by)}`);
+}
 console.log("result:");
 for (const s of r.sections) console.log(`  score=${s.score.toFixed(3)} rprob=${isNaN(s.rprob) ? "  -  " : s.rprob.toFixed(3)} ${short(`${s.note_id}#${s.ord}`)} [${s.heading.slice(0, 30)}] ${s.why.join(",")}`);
 await index.close();

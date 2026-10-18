@@ -11,6 +11,8 @@ import path from "node:path";
 import { loadConfig } from "../dist/config.js";
 import { VaultIndex } from "../dist/vault/index.js";
 import { extractLinks, parseNote } from "../dist/vault/parse.js";
+import { fairSwap, graphPrefix, linkedPartners, protectedKeys, selectGraphPicks } from "../dist/vault/graph-select.js";
+import { clampGraph, GRAPH_DEFAULTS } from "../dist/vault/graph.js";
 
 let failed = 0;
 const check = (label, ok, detail = "") => {
@@ -56,6 +58,70 @@ check("a table link to a heading, escaped pipe: the heading has no backslash", h
 const embedLine = `${Array.from({ length: 50 }, (_, i) => `[[Some Long Target Name ${i}|t${i}]]`).join(" ")} see ![[Restore Flow]]${" and then a long explanation follows".repeat(12)}`;
 const embed = extractLinks(embedLine, {}).find((o) => o.kind === "embed");
 check("an embed's sentence on a long line holds the embed", embed?.ctx?.includes("Restore Flow"), embed?.ctx);
+
+// ---------------------------------------------------------------- choosing linked sections for the ranker
+const mkNb = (id, strength, dir = "out", occs = [{ pos: 0, ord: 0, kind: "sentence", weight: 1 }], kind = "sentence") => ({ id, dir, strength, kind, from: dir === "out" ? "S" : id, pos: 0, fromOrd: 0, heading: null, occs });
+const seed = (note, score = 1, title = note) => ({ note, key: `${note}#0`, title, score });
+const pick = (note, score, extra = {}) => ({ note, key: `${note}#0`, ord: 0, fit: 1, score, seed: seed("S"), nb: mkNb(note, 1), ...extra });
+{
+  const head = [1, 0.9, 0.8, 0.5, 0.4, 0.3].map((sc, i) => ({ key: `H${i}`, score: sc }));
+  const sw = fairSwap({ head, picks: [pick("A", 0.35), pick("B", 0.3)], fusedTop: 1, protect: new Set(), swapWeight: 1 });
+  check("fair swap: a pick takes the weakest place it beats; the next, weaker than the next place, is beaten", sw.admitted.map((g) => g.note).join() === "A" && sw.displaced[0].fusedRank === 6 && sw.beaten.map((g) => g.note).join() === "B", JSON.stringify(sw));
+  check("fair swap: a pick equal to the place is beaten", fairSwap({ head, picks: [pick("A", 0.3)], fusedTop: 1, protect: new Set(), swapWeight: 1 }).admitted.length === 0);
+  const prot = fairSwap({ head, picks: [pick("A", 0.45)], fusedTop: 1, protect: new Set(["H5"]), swapWeight: 1 });
+  check("fair swap: a protected place is skipped, so the pick meets the next one up", prot.displaced[0]?.key === "H4", JSON.stringify(prot.displaced));
+  const all = fairSwap({ head, picks: [pick("A", 9), pick("B", 8), pick("C", 7), pick("D", 6)], fusedTop: 1, protect: new Set(), swapWeight: 100 });
+  check("fair swap: the top 3 places are never taken", all.displaced.every((d) => d.fusedRank > 3) && all.admitted.length === 3 && all.noSlot.map((g) => g.note).join() === "D", JSON.stringify(all.displaced));
+  const none = fairSwap({ head, picks: [pick("A", 9)], fusedTop: 1, protect: new Set(["H3", "H4", "H5"]), swapWeight: 1 });
+  check("fair swap: with every place protected the picks get no slot", none.noSlot.length === 1 && !none.admitted.length);
+}
+{
+  const nbs = { S1: [mkNb("A", 0.9), mkNb("Hidden", 0.8), mkNb("Listed", 0.7), mkNb("Hub", 0.6), mkNb("Off", 0.5), mkNb("NoVec", 0.45), mkNb("B", 0.4), mkNb("C", 0.3), mkNb("Weak", 0.1)], S2: [mkNb("A", 1), mkNb("D", 0.5)] };
+  const access = (id) => (id === "Hidden" ? "hidden" : id === "Off" ? "filtered" : "ok");
+  const sel = selectGraphPicks({ seeds: [seed("S1", 1), seed("S2", 0.5)], neighbours: (id) => nbs[id] ?? [], isStructural: (id) => id === "Hub", access, listed: new Set(["Listed"]), bestWindow: (id) => (id === "NoVec" ? undefined : { ord: 0, cos: 0.5 }), minWeight: 0.2, linksPerSeed: 2, max: 2 });
+  const st = (note) => sel.trace.filter((t) => t.note === note).map((t) => t.status).join();
+  check(
+    "selection: the link floor, hidden notes untraced, listed / structural / filtered / no-vector traced, the per-seed cap",
+    !sel.trace.some((t) => t.note === "Hidden" || t.note === "Weak") && st("Listed") === "listed" && st("Hub") === "structural" && st("Off") === "filtered" && st("NoVec") === "no-vector" && st("C") === "cap",
+    JSON.stringify(sel.trace.map((t) => [t.note, t.status])),
+  );
+  check("selection: a note reached twice keeps its best score (the earlier seed on a tie), best first, then no-slot", sel.picks.map((g) => `${g.note}:${g.seed.note}`).join() === "A:S1,B:S1" && sel.overflow.map((g) => g.note).join() === "D" && st("D") === "no-slot", JSON.stringify({ picks: sel.picks.map((g) => [g.note, g.seed.note, g.score]), over: sel.overflow.map((g) => g.note) }));
+}
+{
+  const p = protectedKeys({ lex: ["a", "b", "c", "d"], den: ["e", "f", "g", "d"], exact: ["x"], note: ["h"] }, ["s"], ["a", "d", "z", "x"]);
+  check("protected: each list's top 3, exact-date hits, seeds, and entries both kinds of list rank in the top 10", ["a", "b", "c", "e", "f", "g", "h", "x", "s", "d"].every((k) => p.has(k)) && !p.has("z"), JSON.stringify([...p]));
+}
+{
+  const ctx = (from, pos) => ({ "S:0": "The restore steps live in Restore runbook and nowhere else.", "S:3": "Second mention of Restore runbook here.", "N:1": "This builds on Seed for the nightly restore." })[`${from}:${pos}`] ?? null;
+  const heading = (note, ord) => ({ "S:0": "Seed", "S:2": "Retention" })[`${note}:${ord}`] ?? null;
+  const occs = [{ pos: 0, ord: 0, kind: "sentence", weight: 1 }, { pos: 3, ord: 2, kind: "sentence", weight: 1 }];
+  const out = (cos) => graphPrefix({ ...pick("T", 1), seed: seed("S", 1, "Seed"), nb: mkNb("T", 1, "out", occs) }, { windowCos: cos, ctx, heading });
+  check("prefix: an out-link from the seed's title window", out((k) => (k === "S#0" ? 0.9 : 0.1)) === "Linked from Seed: The restore steps live in Restore runbook and nowhere else.", out((k) => (k === "S#0" ? 0.9 : 0.1)));
+  check("prefix: an out-link from a headed window, chosen by the window closest to the question", out((k) => (k === "S#2" ? 0.9 : 0.1)) === "Linked from Seed / Retention: Second mention of Restore runbook here.", out((k) => (k === "S#2" ? 0.9 : 0.1)));
+  const inl = (ord) => graphPrefix({ ...pick("N", 1), ord, seed: seed("S", 1, "Seed"), nb: mkNb("N", 1, "in", [{ pos: 1, ord: 1, kind: "sentence", weight: 1 }]) }, { windowCos: () => 0, ctx, heading });
+  check("prefix: an in-link, and none when the chosen window already holds the sentence", inl(0) === "Links to Seed: This builds on Seed for the nightly restore." && inl(1) === null, `${inl(0)} | ${inl(1)}`);
+  check("prefix: none for a frontmatter-only link", graphPrefix({ ...pick("R", 1), seed: seed("S"), nb: mkNb("R", 0.3, "out", [{ pos: 5, ord: null, kind: "fm:related", weight: 0.3 }], "fm:related") }, { windowCos: () => 0, ctx, heading }) === null);
+  const long = graphPrefix({ ...pick("T", 1), seed: seed("S", 1, "Seed"), nb: mkNb("T", 1, "out", [{ pos: 0, ord: 0, kind: "sentence", weight: 1 }]) }, { windowCos: () => 0, ctx: () => "x".repeat(300), heading: () => null });
+  check("prefix: a long sentence is cut to 200 characters", long.length - "Linked from Seed: ".length === 200 && long.endsWith("…"), String(long?.length));
+}
+{
+  const nbs = { K1: [mkNb("P", 0.5), mkNb("Hubby", 0.4), mkNb("Q", 0.3)], K2: [mkNb("P", 0.5), mkNb("Q", 0.35)] };
+  const order = [
+    { i: 0, note: "K1", cut: "kept", reranked: true, graph: false },
+    { i: 1, note: "Q", cut: "trim", reranked: true, graph: false },
+    { i: 2, note: "Hubby", cut: "trim", reranked: true, graph: false },
+    { i: 3, note: "P", cut: "trim", reranked: true, graph: false },
+    { i: 4, note: "P", cut: "trim", reranked: true, graph: false },
+    { i: 5, note: "G", cut: "trim", reranked: true, graph: true },
+  ];
+  const lp = linkedPartners({ order, kept: ["K1", "K2"], neighbours: (id) => nbs[id] ?? [], isStructural: (id) => id === "Hubby", minWeight: 0.2, max: 5, room: 5 });
+  check("partners: trimmed rows a kept note links to, in score order, the strongest anchor, structural notes and graph rows left out, each note once", JSON.stringify(lp.map((x) => [x.i, x.anchor])) === JSON.stringify([[1, "K2"], [3, "K1"]]), JSON.stringify(lp));
+  check("partners: at most min(max, room)", linkedPartners({ order, kept: ["K1", "K2"], neighbours: (id) => nbs[id] ?? [], isStructural: () => false, minWeight: 0.2, max: 5, room: 1 }).length === 1);
+}
+{
+  const c = clampGraph({ ...GRAPH_DEFAULTS, enabled: true, slots: Number("x"), seeds: -3, linksPerSeed: 99, swapWeight: 1e9, keepMinWeight: 0, prefix: undefined });
+  check("graph settings out of range fall back or are clamped", c.slots === GRAPH_DEFAULTS.slots && c.seeds === 1 && c.linksPerSeed === 10 && c.swapWeight === 1000 && c.keepMinWeight === 0.01 && c.prefix === true && c.enabled === true, JSON.stringify(c));
+}
 
 // ---------------------------------------------------------------- resolution on a throwaway vault
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "brain-graph-"));
@@ -111,6 +177,8 @@ check("a duplicate name elsewhere goes to the shortest path, every time", res("N
 const nb = g.neighbours("Notes/Alpha.md");
 const toBeta = nb.find((n) => n.id === "Notes/Beta.md");
 check("neighbours: the strongest occurrence carries the link", toBeta && toBeta.kind === "sentence" && toBeta.heading === "Setup", JSON.stringify(toBeta));
+const toR = g.neighbours("Notes/Alpha.md").find((n) => n.id === "Projects/X/Notes/github account.md");
+check("neighbours list every occurrence that carries a link, with its window", Array.isArray(toBeta?.occs) && toBeta.occs.length === 2 && toBeta.occs.every((o) => o.ord !== null) && toR?.occs.length === 1, JSON.stringify({ beta: toBeta?.occs, r: toR?.occs }));
 check("unresolved targets are reported, not dropped silently", g.stats().unresolved.some(([t]) => t === "zeta title"), JSON.stringify(g.stats().unresolved));
 const outOf = (id) => index.outgoing(id).map((l) => [l.target, l.note?.id ?? null]);
 const backOf = (id) => index.backlinks(id).map((n) => n.id);

@@ -1,6 +1,7 @@
 // Verifies that notes a connection may not read stay out of its results: hybrid ranking drops them before fusion and
-// they never crowd readable notes out of a list, brain_search / brain_context never return them, spelling corrections
-// never come from their words, and brain_read's links line and the move/delete warnings never name them. Throwaway
+// they never crowd readable notes out of a list, brain_search / brain_context never return them (with the link graph
+// on too), spelling corrections never come from their words, and brain_read's links line and the move/delete
+// warnings never name them. Throwaway
 // vault in the OS temp folder; the models stay in the repository's data/models, so nothing is downloaded again.
 // Run after `npm run build`.
 import fs from "node:fs";
@@ -119,6 +120,17 @@ check("brain_move's warning does not name private notes", !r.err && !r.t.include
 await call(writer, "brain_move", { note: "Notes/Archive/Plan.md", to: "Notes/Plan.md" });
 r = await call(writer, "brain_delete", { note: "Notes/Plan.md" });
 check("brain_delete's warning does not name private notes", !r.err && !r.t.includes("Private/"), r.t);
+
+// ---- the same with the link graph on, linked sections forced in and partners kept on the weakest link
+cfg.retrieval.graph = { ...cfg.retrieval.graph, enabled: true, slots: 10, swapWeight: 100, keepLinked: 1, keepMinWeight: 0.01 };
+const gq = await index.rankSections(q, { k: 20, debug: true, readable: (n) => policy.canRead(n, readOnlyP) });
+check("with the graph on, ranking never shows a private note anywhere", !JSON.stringify([gq.sections.map((x) => [x.note_id, x.why]), gq.debug?.pool, gq.debug?.graph]).includes("Private/"), JSON.stringify(gq.debug?.graph?.candidates ?? []).slice(0, 300));
+r = await call(readOnly, "brain_search", { query: q });
+check("with the graph on, brain_search hides private notes", !r.t.includes("Private/") && !r.t.includes("4,000"), r.t.slice(0, 300));
+r = await call(readOnly, "brain_context", { question: "How much is the lighthouse restoration budget?" });
+check("with the graph on, brain_context hides private notes", !r.t.includes("Private/") && !r.t.includes("4,000"), r.t.slice(0, 300));
+const gFull = await index.rankSections(q, { k: 20, readable: (n) => policy.canRead(n, fullP) });
+check("with the graph on, a caller with private scope still sees the private note", gFull.sections.some((x) => x.note_id.startsWith("Private/")), gFull.sections.map((x) => x.note_id).join(", "));
 
 await full.close();
 await readOnly.close();

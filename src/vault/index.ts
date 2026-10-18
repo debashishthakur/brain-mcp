@@ -3,7 +3,8 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import chokidar, { type FSWatcher } from "chokidar";
 import { codeLines, extractLinks, linkWindows, parseNoteFile, splitSections, stripConnections, stripLink, toId, type ParsedNote } from "./parse.js";
-import { LinkGraph, STRUCTURAL_TYPES } from "./graph.js";
+import { clampGraph, LinkGraph, STRUCTURAL_TYPES } from "./graph.js";
+import { fairSwap, graphPrefix, linkedPartners, protectedKeys, selectGraphPicks, TOP_FIXED, type Access, type CandTrace, type GraphPick, type Seed } from "./graph-select.js";
 import { DenseIndex } from "./dense.js";
 import { FactStore } from "../facts.js";
 import type { ResolvedConfig } from "../config.js";
@@ -176,6 +177,24 @@ export interface RankStats {
   reranked: number;
   /** Best reranker probability; null when the reranker did not run. */
   topProb: number | null;
+  /** With retrieval.graph on: what the link graph added (counts only). */
+  graph?: GraphStats;
+}
+
+export interface GraphStats {
+  /** The graph step ran (not on the early-exit shortcut). */
+  ran: boolean;
+  seeds: number;
+  /** Linked sections worth a place. */
+  candidates: number;
+  /** Linked sections given a reranker place, and the fused entries they replaced. */
+  admitted: number;
+  displaced: number;
+  /** Trimmed sections kept as a kept hit's link partner. */
+  partners: number;
+  /** Best reranker probability among linked sections. */
+  topProb: number | null;
+  ms: number;
 }
 
 /** Why a pooled section did or did not reach the result: kept, refused by the floor, trimmed by keepRatio, or past k. */
@@ -183,14 +202,18 @@ export type PoolCut = "kept" | "floor" | "trim" | "limit";
 
 export interface PoolEntry {
   key: string;
-  /** head: inside the top `rerankN` of the fused list · first: a list's first pick added below it */
-  src: "head" | "first";
+  /** head: inside the top `rerankN` of the fused list · first: a list's first pick added below it · graph: a linked section */
+  src: "head" | "first" | "graph";
   /** 1-based position in the fused list. */
   fusedRank: number;
   reranked: boolean;
   prob: number | null;
   score: number | null;
   cut: PoolCut;
+  /** For a linked section: the seed it was reached from and the link. */
+  graph?: { seed: string; dir: "out" | "in"; kind: string; strength: number; fit: number; score: number; prefixed: boolean };
+  /** Kept as the link partner of this kept note. */
+  partnerOf?: string;
 }
 
 /** The ranker's working state for one query, returned only when asked for (`debug: true`). */
@@ -199,6 +222,13 @@ export interface RankDebug {
   /** Fused order, best first (at most 200). */
   fused: { key: string; score: number }[];
   pool: PoolEntry[];
+  /** With retrieval.graph on: the seeds, every linked note considered and what became of it, places given, partners. */
+  graph?: {
+    seeds: { note: string; key: string; score: number }[];
+    candidates: CandTrace[];
+    displaced: { key: string; fusedRank: number; by: string }[];
+    partners: { key: string; anchor: string; strength: number; kind: string }[];
+  };
 }
 
 export interface RankResult {
@@ -746,11 +776,12 @@ export class VaultIndex {
     const lex = this.bm25Sections(u.terms, o, 40);
     const exact = dates.length ? this.dateHits(dates, o) : [];
     const modelsOk = this.dense ? await this.dense.ready() : false;
-    const den = modelsOk
-      ? (o.readable ? (await this.dense!.search(query, Infinity)).filter((h) => { const n = noteOf(h.note_id); return !!n && o.readable!(n); }).slice(0, 40) : await this.dense!.search(query, 40))
-          .filter((h) => this.noteFilterOk(noteOf(h.note_id), o))
-          .map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }))
-      : [];
+    // Every section's cosine, best first (one embedding): the meaning list is its top 40, and the graph step reads it.
+    const dAll = modelsOk ? await this.dense!.scoreAll(query) : [];
+    const den = (o.readable ? dAll.filter((h) => { const n = noteOf(h.note_id); return !!n && o.readable!(n); }) : dAll)
+      .slice(0, 40)
+      .filter((h) => this.noteFilterOk(noteOf(h.note_id), o))
+      .map((h) => ({ key: `${h.note_id}#${h.ord}`, note_id: h.note_id, ord: h.ord }));
     // Note-level BM25 (title x4 over the whole body) as a fourth list, anchored on each note's first window:
     // a note whose title names the subject still competes when no single window carries every term.
     // A note with no section (an empty file, or frontmatter only) has nothing to return, so its title alone must not
@@ -806,7 +837,7 @@ export class VaultIndex {
       return done(out, "lexical", false);
     }
 
-    const cands = fused.slice(0, rc.rerankN);
+    let cands = fused.slice(0, rc.rerankN);
     const headN = cands.length;
     if (rc.firstPicks) {
       // Every list's first pick is reranked wherever fusion put it. A section only one list finds, such as one fact in
@@ -828,11 +859,89 @@ export class VaultIndex {
       den.length > 0 &&
       lex[0].key === den[0].key &&
       (!rc.firstPicks || cands.slice(0, 3).some((c) => c.key === lex[0].key));
-    const passage = (c: { item: { note_id: string; ord: number } }) => {
+    // ---- the link graph (retrieval.graph): linked sections may take reranker places, never on the shortcut.
+    // Graph rows go after every list's rows (from `graphFrom`); the pool keeps its size, so the pairs stay the same.
+    const gc = clampGraph(rc.graph);
+    let headKept = headN;
+    let graphFrom = cands.length;
+    const graphRows = new Map<number, GraphPick>();
+    const prefixOf = new Map<number, string>();
+    const gstats: GraphStats | undefined = gc.enabled ? (stats.graph = { ran: false, seeds: 0, candidates: 0, admitted: 0, displaced: 0, partners: 0, topProb: null, ms: 0 }) : undefined;
+    let gdebug: RankDebug["graph"];
+    if (gstats && debug) gdebug = debug.graph = { seeds: [], candidates: [], displaced: [], partners: [] };
+    const maxSlots = Math.min(gc.slots, headN - TOP_FIXED);
+    if (gstats && !agree && maxSlots > 0) {
+      const g0 = Date.now();
+      const accessOf = new Map<string, Access>();
+      const access = (id: string): Access => {
+        let a = accessOf.get(id);
+        if (!a) {
+          const n = noteOf(id);
+          a = !n || (o.readable && !o.readable(n)) ? "hidden" : this.noteFilterOk(n, o) ? "ok" : "filtered";
+          accessOf.set(id, a);
+        }
+        return a;
+      };
+      const cosOf = new Map<string, number>();
+      const bestOf = new Map<string, { ord: number; cos: number }>();
+      for (const h of dAll) {
+        cosOf.set(`${h.note_id}#${h.ord}`, h.score);
+        if (!bestOf.has(h.note_id)) bestOf.set(h.note_id, { ord: h.ord, cos: h.score });
+      }
+      const seeds: Seed[] = [];
+      for (const f of fused.slice(0, Math.min(gc.seeds, headN)))
+        if (!seeds.some((x) => x.note === f.item.note_id)) seeds.push({ note: f.item.note_id, key: f.key, title: noteOf(f.item.note_id)?.title ?? f.item.note_id, score: f.score / fusedTop });
+      const sel = selectGraphPicks({
+        seeds,
+        neighbours: (id) => this.graph.neighbours(id),
+        isStructural: (id) => this.graph.isStructural(id),
+        access,
+        listed: new Set(cands.map((c) => c.item.note_id)),
+        bestWindow: (id) => bestOf.get(id),
+        minWeight: gc.minWeight,
+        linksPerSeed: gc.linksPerSeed,
+        max: maxSlots,
+      });
+      const keys = (l: { key: string }[]) => l.map((x) => x.key);
+      const protect = protectedKeys({ lex: keys(lex), den: keys(den), exact: keys(exact), note: keys(noteList) }, seeds.map((x) => x.key), keys(cands.slice(0, headN)));
+      const sw = fairSwap({ head: cands.slice(0, headN).map((c) => ({ key: c.key, score: c.score })), picks: sel.picks, fusedTop, protect, swapWeight: gc.swapWeight });
+      if (sw.admitted.length) {
+        const gone = new Set(sw.displaced.map((d) => d.key));
+        const rest = cands.filter((c) => !gone.has(c.key));
+        headKept = headN - gone.size;
+        graphFrom = rest.length;
+        // A graph row keeps the fused score some list gave it, or 0: no fused evidence is invented.
+        const fusedScore = new Map(fused.map((f) => [f.key, f.score]));
+        cands = [...rest, ...sw.admitted.map((g) => ({ key: g.key, score: fusedScore.get(g.key) ?? 0, item: { key: g.key, note_id: g.note, ord: g.ord } }))];
+        sw.admitted.forEach((g, j) => {
+          graphRows.set(graphFrom + j, g);
+          const pre = gc.prefix
+            ? graphPrefix(g, {
+                windowCos: (key) => cosOf.get(key) ?? -1,
+                ctx: (from, pos) => this.graph.ctx(from, pos),
+                heading: (note, ord) => (secStmt.get(note, ord) as { heading: string } | undefined)?.heading ?? null,
+              })
+            : null;
+          if (pre) prefixOf.set(graphFrom + j, pre);
+        });
+      }
+      Object.assign(gstats, { ran: true, seeds: seeds.length, candidates: sel.picks.length + sel.overflow.length, admitted: sw.admitted.length, displaced: sw.displaced.length, ms: Date.now() - g0 });
+      if (gdebug) {
+        gdebug.seeds = seeds.map((x) => ({ note: x.note, key: x.key, score: x.score }));
+        const status = new Map<GraphPick, CandTrace["status"]>([...sw.admitted.map((g) => [g, "admitted"] as const), ...sw.beaten.map((g) => [g, "beaten"] as const), ...sw.noSlot.map((g) => [g, "no-slot"] as const)]);
+        gdebug.candidates = [
+          ...sel.picks.map((g) => ({ note: g.note, key: g.key, seed: g.seed.note, dir: g.nb.dir, kind: g.nb.kind, strength: g.nb.strength, fit: g.fit, score: g.score, status: status.get(g) ?? "no-slot" })),
+          ...sel.trace,
+        ];
+        gdebug.displaced = sw.displaced;
+      }
+    }
+    const passage = (c: { item: { note_id: string; ord: number } }, i: number) => {
       const note = noteOf(c.item.note_id);
       const sec = secStmt.get(c.item.note_id, c.item.ord) as { heading: string; text: string } | undefined;
       const head = sec && note && sec.heading.toLowerCase() !== note.title.toLowerCase() ? ` / ${sec.heading}` : "";
-      return `${note?.title ?? ""}${head}\n${sec?.text ?? ""}`;
+      const pre = prefixOf.get(i);
+      return `${pre ? `${pre}\n` : ""}${note?.title ?? ""}${head}\n${sec?.text ?? ""}`;
     };
     let probs: number[];
     if (agree) {
@@ -845,33 +954,46 @@ export class VaultIndex {
       probs = await this.dense!.rerank(query, cands.map(passage));
     }
     const reranked = agree ? Math.min(3, cands.length) : cands.length;
-    const topR = Math.max(...probs.slice(0, reranked));
+    // The floor and the coverage label come from the lists' rows only: a linked section cannot turn "none" into an
+    // answer or "thin" into "good".
+    const topR = Math.max(...probs.slice(0, Math.min(reranked, graphFrom)));
     stats.pool = cands.length;
     stats.reranked = reranked;
     stats.topProb = topR;
+    if (gstats && graphFrom < cands.length) gstats.topProb = Math.max(...probs.slice(graphFrom, reranked));
     const fusedRankOf = new Map(fused.map((f, i) => [f.key, i + 1]));
-    const pool: PoolEntry[] = cands.map((c, i) => ({
-      key: c.key,
-      src: i < headN ? "head" : "first",
-      fusedRank: fusedRankOf.get(c.key) ?? 0,
-      reranked: i < reranked,
-      prob: i < reranked ? probs[i] : null,
-      score: null,
-      cut: "floor",
-    }));
+    const pool: PoolEntry[] = cands.map((c, i) => {
+      const g = graphRows.get(i);
+      return {
+        key: c.key,
+        src: i < headKept ? "head" : i < graphFrom ? "first" : "graph",
+        fusedRank: fusedRankOf.get(c.key) ?? 0,
+        reranked: i < reranked,
+        prob: i < reranked ? probs[i] : null,
+        score: null,
+        cut: "floor",
+        ...(g ? { graph: { seed: g.seed.note, dir: g.nb.dir, kind: g.nb.kind, strength: g.nb.strength, fit: g.fit, score: g.score, prefixed: prefixOf.has(i) } } : {}),
+      };
+    });
     if (debug) debug.pool = pool;
     // With agreeOverride, keyword and meaning search putting the same section first answers "thin" with that note
     // instead of refusing: evidence the reranker missed, though one rare shared word makes both searches agree too.
     const searchAgrees = rc.agreeOverride && lex.length > 0 && den.length > 0 && lex[0].key === den[0].key;
     if (topR < rc.floor && !searchAgrees) return done([], "none", agree);
     const overridden = topR < rc.floor;
+    const isGraph = (i: number) => i >= graphFrom;
     const scored = cands.map((c, i) => ({ c, i, prob: probs[i], score: (1 - rc.blend) * probs[i] + rc.blend * (c.score / fusedTop), reranked: i < reranked }));
     scored.sort((a, b) => b.score - a.score);
-    const top = scored[0].score;
+    // The trim bar and minKeep count the lists' rows only, so a linked section cannot raise the bar or use up minKeep.
+    const top = (scored.find((x) => !isGraph(x.i)) ?? scored[0]).score;
+    const bar = Math.max(0.02, rc.keepRatio * top);
+    const tagsOf = (key: string) => [...(lex.some((x) => x.key === key) ? ["keyword"] : []), ...(den.some((x) => x.key === key) ? ["semantic"] : []), ...(exact.some((x) => x.key === key) ? ["exact date"] : []), ...(noteList.some((x) => x.key === key) ? ["title"] : [])];
     const out: RankedSection[] = [];
     // Sorted best first, so once one entry is trimmed or past k, every later one is too. The best `minKeep` are
-    // never trimmed: the second note of a two-note answer often scores far below the first.
+    // never trimmed: the second note of a two-note answer often scores far below the first. A linked section is kept
+    // on its own merits (at least the floor) and never stops the walk.
     let stop: PoolCut | null = null;
+    let keptBase = 0;
     for (const s of scored) {
       pool[s.i].score = s.score;
       // An overridden answer vouches for the agreed note only; everything else scored under the floor.
@@ -879,17 +1001,50 @@ export class VaultIndex {
         pool[s.i].cut = "floor";
         continue;
       }
-      if (!stop && out.length >= rc.minKeep && s.score < Math.max(0.02, rc.keepRatio * top)) stop = "trim";
-      if (!stop && out.length >= k) stop = "limit";
-      if (stop) {
-        pool[s.i].cut = stop;
-        continue;
+      if (isGraph(s.i)) {
+        const cut = stop ?? (s.prob < rc.floor ? "floor" : s.score < bar ? "trim" : out.length >= k ? "limit" : null);
+        if (cut) {
+          pool[s.i].cut = cut;
+          continue;
+        }
+      } else {
+        if (!stop && keptBase >= rc.minKeep && s.score < bar) stop = "trim";
+        if (!stop && out.length >= k) stop = "limit";
+        if (stop) {
+          pool[s.i].cut = stop;
+          continue;
+        }
       }
-      const why = [s.reranked ? `rerank ${s.prob.toFixed(2)}` : "fused tail", ...(lex.some((x) => x.key === s.c.key) ? ["keyword"] : []), ...(den.some((x) => x.key === s.c.key) ? ["semantic"] : []), ...(exact.some((x) => x.key === s.c.key) ? ["exact date"] : []), ...(noteList.some((x) => x.key === s.c.key) ? ["title"] : [])];
+      const g = graphRows.get(s.i);
+      const why = [s.reranked ? `rerank ${s.prob.toFixed(2)}` : "fused tail", ...(g ? [`graph: ${g.nb.dir === "out" ? "linked from" : "links to"} ${g.seed.title}`] : []), ...tagsOf(s.c.key)];
       const sec = materialise(s.c.item, s.score, s.reranked ? s.prob : NaN, why);
       if (sec) {
         out.push(sec);
         pool[s.i].cut = "kept";
+        if (!g) keptBase++;
+      }
+    }
+    // A trimmed section a kept hit links to is kept after all, after every hit (at most keepLinked).
+    if (gstats && gc.keepLinked > 0 && !agree && !overridden && stop === "trim" && out.length < k) {
+      const partners = linkedPartners({
+        order: scored.map((x) => ({ i: x.i, note: x.c.item.note_id, cut: pool[x.i].cut, reranked: x.reranked, graph: isGraph(x.i) })),
+        kept: [...new Set(out.map((x) => x.note_id))],
+        neighbours: (id) => this.graph.neighbours(id),
+        isStructural: (id) => this.graph.isStructural(id),
+        minWeight: gc.keepMinWeight,
+        max: gc.keepLinked,
+        room: k - out.length,
+      });
+      for (const pt of partners) {
+        const x = scored.find((y) => y.i === pt.i)!;
+        const sec = materialise(x.c.item, x.score, x.prob, [`rerank ${x.prob.toFixed(2)}`, `link partner of ${noteOf(pt.anchor)?.title ?? pt.anchor}`, ...tagsOf(x.c.key)]);
+        if (!sec) continue;
+        out.push(sec);
+        pool[pt.i].cut = "kept";
+        pool[pt.i].partnerOf = pt.anchor;
+        gstats.ran = true;
+        gstats.partners++;
+        gdebug?.partners.push({ key: x.c.key, anchor: pt.anchor, strength: pt.strength, kind: pt.kind });
       }
     }
     return done(out, !overridden && topR >= rc.goodAt ? "good" : "thin", agree);
