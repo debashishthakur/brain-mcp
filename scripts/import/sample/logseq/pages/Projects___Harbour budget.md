@@ -1,0 +1,3 @@
+- The refit budget is 4200 EUR, tracked for [[Harbour Project]].
+	- Engine service: 900 EUR
+	- Sails: 1500 EUR

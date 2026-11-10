@@ -61,6 +61,8 @@ jobs:
         run: node scripts/verify-graph.mjs
       - name: Unlinked mentions in write replies
         run: node scripts/verify-mentions.mjs
+      - name: Importers (Logseq, Notion, Markdown) and the links they write
+        run: node scripts/verify-import.mjs
       - name: Retrieval eval, keyword vs hybrid
         run: node scripts/eval-retrieval.mjs
       - name: Hard eval set (fails if two runs disagree or the reranker pair count changes)
