@@ -209,6 +209,7 @@ node scripts/verify-ranking.mjs  # the ranker with stand-in models: empty shortl
 node scripts/verify-policy.mjs   # notes a connection may not read never rank, appear or get named in a links line
 node scripts/verify-graph.mjs    # link kinds, every way of writing a link target, duplicate names, the window each link sits in
 node scripts/verify-mentions.mjs # write replies name existing notes mentioned without a link, never private or already-linked ones
+node scripts/verify-import.mjs   # the Logseq, Notion and Markdown importers, and the links they write, read back through the server
 node scripts/verify-setup.mjs    # npm run setup, in a temp folder
 node scripts/verify-package.mjs  # the npm package as a new user gets it: pack, install, init, serve
 node scripts/verify-smart-search.mjs  # the smart-search add-on: this OS's runtime only, hybrid ranking, remove
@@ -276,6 +277,26 @@ See your vault the way search sees it. `npm run graph` exports the link graph, a
 npm run graph
 cd visualizer && python3 -m http.server 4750 --bind 127.0.0.1   # open http://127.0.0.1:4750/
 ```
+
+## Import notes from another tool
+
+brain-mcp reads any folder of Markdown, but it reads Obsidian-style frontmatter and `[[wikilinks]]` best. The importers in [`scripts/import/`](scripts/import) bring notes from other tools into a vault in that form. They only read the source, never change it, and have no dependencies beyond the ones brain-mcp already installs.
+
+```bash
+node scripts/import/import.mjs logseq   ~/logseq-graph  --to ~/second-brain
+node scripts/import/import.mjs notion   ~/notion-export --to ~/second-brain   # unzip the "Markdown & CSV" export first
+node scripts/import/import.mjs markdown ~/old-notes     --to ~/second-brain
+```
+
+Notes land in `<vault>/Imported/` (`--into <folder>` changes that). `--project "Name"` puts every imported note in a project, `--dry-run` shows what would happen and writes nothing, and a second run skips notes that already exist (so your edits are safe; `--force` replaces them). Each run ends with a count of what was converted and what was left out. Try one on the fictional samples in [`scripts/import/sample/`](scripts/import/sample).
+
+| Source | Converted | Not converted |
+| --- | --- | --- |
+| **Logseq** graph (`pages/`, `journals/`) | Pages and journals; page properties (`title::`, `alias::`, `tags::`, `type::`, others as plain keys); namespaces (`a___b.md` is the title `a/b`); `#tags` and `#[[tags]]` as links; `TODO`/`DONE` as checkboxes; `[label]([[Page]])`; the outline (top-level bullets become paragraphs, nested bullets stay lists); journal pages answer to Logseq's default link text (`Sep 23rd, 2026`) | Block references `((uuid))`, block embeds, macros and queries, block properties (dropped and counted); assets; a non-default journal date format |
+| **Notion** export | Pages and subpages with the 32-character IDs removed from names; the title; links between pages as `[[wikilinks]]`; the property lines under a database page's title (`Tags` as topics, `Last Edited Time` as `modified`, the rest as plain keys); `part-of` from a subpage to its parent | Database tables (`.csv`), images and attachments (not copied), links to pages outside the export (kept as text) |
+| **Markdown** folder | Folder structure and file names; existing frontmatter kept, with `title`, `type`, `modified` and `topics` (from `tags`) filled in; relative links like `[text](sub/Other.md)` as `[[Other\|text]]` | Links to files that are not notes (kept as they are); the heading part of a link; notes whose frontmatter is not valid YAML are imported without it |
+
+Links and tags inside code blocks and inline code are never rewritten. After an import, run `npm run reindex` to see the new note count, then `node scripts/graph-stats.mjs` to see how many links resolved.
 
 ## Use your own vault
 
@@ -511,7 +532,7 @@ Found a vulnerability? Please report it privately, as described in [SECURITY.md]
 - [ ] Graph expansion with Personalized PageRank over wikilinks ([#2](https://github.com/debashishthakur/brain-mcp/issues/2))
 - [ ] Harder eval questions ([#4](https://github.com/debashishthakur/brain-mcp/issues/4))
 - [x] Docker image ([#5](https://github.com/debashishthakur/brain-mcp/issues/5)) — `Dockerfile` + `docker-compose.yml`, see [Run with Docker](#run-with-docker)
-- [ ] Importers for other note tools ([#6](https://github.com/debashishthakur/brain-mcp/issues/6))
+- [x] Importers for Logseq, Notion exports and plain Markdown folders ([#6](https://github.com/debashishthakur/brain-mcp/issues/6)), see [Import notes from another tool](#import-notes-from-another-tool)
 - [ ] Passkey sign-in ([#7](https://github.com/debashishthakur/brain-mcp/issues/7))
 - [x] Facts that change over time: replacements, expiry and history ([#8](https://github.com/debashishthakur/brain-mcp/issues/8))
 
